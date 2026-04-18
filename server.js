@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 // 🔹 CONFIG
-const GOOGLE_API_KEY = "COLE_SUA_API_KEY_AQUI";
+const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 
 // 🔹 FORMATA DATA (YYYY-MM-DD → DD.MM.YYYY)
 function formatarData(dataISO) {
