@@ -5,25 +5,32 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// 🔹 FORMATA DATA (YYYY-MM-DD → DD.MM.YYYY)
+// 🔥 LIBERAR CORS
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "*");
+  res.header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
+
+// 🔹 FORMATADORES
 function formatarData(dataISO) {
   if (!dataISO) return "sem-data";
-
-  const partes = dataISO.split("-");
-  if (partes.length !== 3) return dataISO;
-
-  const [ano, mes, dia] = partes;
+  const [ano, mes, dia] = dataISO.split("-");
   return `${dia}.${mes}.${ano}`;
 }
 
-// 🔹 FORMATA DLT (ex: 9 → DLT-0009)
 function formatarDLT(dlt) {
-  if (!dlt) return "DLT-0000";
-
   const numero = dlt.toString().replace(/\D/g, "");
   return `DLT-${numero.padStart(4, "0")}`;
 }
 
+// 🚀 ROTA ZIP
 app.post("/zip", async (req, res) => {
   try {
     const { arquivos } = req.body;
@@ -43,33 +50,29 @@ app.post("/zip", async (req, res) => {
         const url = `https://drive.google.com/uc?id=${arq.id}`;
         const response = await fetch(url);
 
-        if (!response.ok) {
-          console.log("Erro ao baixar:", arq.id);
-          continue;
-        }
+        if (!response.ok) continue;
 
         const buffer = await response.arrayBuffer();
 
-        const nomeArquivo = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`
-          .replace(/\s+/g, "_");
+        const nome = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`;
 
-        archive.append(Buffer.from(buffer), { name: nomeArquivo });
+        archive.append(Buffer.from(buffer), { name: nome });
 
       } catch (e) {
-        console.log("Erro no arquivo:", arq.id, e.message);
+        console.log("Erro arquivo:", arq.id);
       }
     }
 
     await archive.finalize();
 
   } catch (e) {
-    console.error("Erro geral:", e.message);
     res.status(500).json({ erro: "Erro ao gerar ZIP" });
   }
 });
 
+// teste
 app.get("/", (req, res) => {
-  res.send("API ZIP funcionando 🚀");
+  res.send("API ZIP OK");
 });
 
-app.listen(3000, () => console.log("Servidor rodando na porta 3000"));
+app.listen(3000, () => console.log("Rodando"));
