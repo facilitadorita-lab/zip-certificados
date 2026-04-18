@@ -5,39 +5,50 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// 🔥 LIBERAR CORS (resolve erro no Lovable)
+// 🔥 CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
   res.header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
 
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
-
+  if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
-// 🔹 CONFIG
-const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
-
-// 🔹 FORMATA DATA (YYYY-MM-DD → DD.MM.YYYY)
+// 🔹 FORMATADORES
 function formatarData(dataISO) {
   if (!dataISO) return "sem-data";
-
-  const partes = dataISO.split("-");
-  if (partes.length !== 3) return dataISO;
-
-  const [ano, mes, dia] = partes;
+  const [ano, mes, dia] = dataISO.split("-");
   return `${dia}.${mes}.${ano}`;
 }
 
-// 🔹 FORMATA DLT (ex: 9 → DLT-0009)
 function formatarDLT(dlt) {
-  if (!dlt) return "DLT-0000";
-
   const numero = dlt.toString().replace(/\D/g, "");
   return `DLT-${numero.padStart(4, "0")}`;
+}
+
+// 🔥 DOWNLOAD ROBUSTO DO DRIVE
+async function baixarArquivoDrive(fileId) {
+  const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+
+  if (!response.ok) return null;
+
+  const contentType = response.headers.get("content-type");
+
+  // ⚠️ se vier HTML → erro
+  if (contentType && contentType.includes("text/html")) {
+    console.log("Recebeu HTML em vez de PDF:", fileId);
+    return null;
+  }
+
+  const buffer = await response.arrayBuffer();
+  return Buffer.from(buffer);
 }
 
 // 🚀 ROTA ZIP
@@ -55,40 +66,42 @@ app.post("/zip", async (req, res) => {
     const archive = archiver("zip", { zlib: { level: 9 } });
     archive.pipe(res);
 
+    let adicionados = 0;
+
     for (const arq of arquivos) {
       try {
-        const url = `https://www.googleapis.com/drive/v3/files/${arq.id}?alt=media&key=${GOOGLE_API_KEY}`;
+        const buffer = await baixarArquivoDrive(arq.id);
 
-        const response = await fetch(url);
-
-        if (!response.ok) {
-          console.log("Erro ao baixar arquivo:", arq.id);
+        if (!buffer || buffer.length < 5000) {
+          console.log("Arquivo ignorado:", arq.id);
           continue;
         }
 
-        const buffer = await response.arrayBuffer();
+        const nome = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`;
 
-        const nomeArquivo = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`
-          .replace(/\s+/g, "_");
-
-        archive.append(Buffer.from(buffer), { name: nomeArquivo });
+        archive.append(buffer, { name: nome });
+        adicionados++;
 
       } catch (e) {
-        console.log("Erro no arquivo:", arq.id, e.message);
+        console.log("Erro no arquivo:", arq.id);
       }
+    }
+
+    if (adicionados === 0) {
+      console.log("⚠️ Nenhum arquivo válido encontrado");
     }
 
     await archive.finalize();
 
   } catch (e) {
-    console.error("Erro geral:", e.message);
+    console.error(e);
     res.status(500).json({ erro: "Erro ao gerar ZIP" });
   }
 });
 
-// 🧪 TESTE
+// TESTE
 app.get("/", (req, res) => {
-  res.send("API ZIP funcionando 🚀");
+  res.send("API ZIP OK 🚀");
 });
 
 app.listen(3000, () => console.log("Servidor rodando"));
