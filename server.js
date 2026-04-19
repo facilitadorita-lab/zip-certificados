@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// 🔥 CORS
+// 🔥 CORS (obrigatório pro Lovable)
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
@@ -13,6 +13,45 @@ app.use((req, res, next) => {
 
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
+});
+
+// 🔹 CONFIG (ALTERAR AQUI)
+const GOOGLE_API_KEY = "COLE_SUA_API_KEY_AQUI";
+const FOLDER_ID = "COLE_ID_DA_PASTA_AQUI";
+
+// 🔹 EXTRAIR DADOS DO NOME
+function extrairDados(nome) {
+  // Ex: DLT-0570_37182979_05.02.2026.pdf
+  const partes = nome.replace(".pdf", "").split("_");
+
+  return {
+    nome,
+    dlt: partes[0]?.replace("DLT-", "") || "",
+    serie: partes[1] || "",
+    data: partes[2]
+      ? partes[2].split(".").reverse().join("-")
+      : ""
+  };
+}
+
+// 🚀 LISTAR ARQUIVOS DO DRIVE
+app.get("/arquivos", async (req, res) => {
+  try {
+    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)&pageSize=1000`;
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    const arquivos = data.files.map(f => ({
+      id: f.id,
+      ...extrairDados(f.name)
+    }));
+
+    res.json(arquivos);
+
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // 🔹 FORMATADORES
@@ -27,31 +66,18 @@ function formatarDLT(dlt) {
   return `DLT-${numero.padStart(4, "0")}`;
 }
 
-// 🔥 DOWNLOAD ROBUSTO DO DRIVE
+// 🔹 BAIXAR DO DRIVE
 async function baixarArquivoDrive(fileId) {
   const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0"
-    }
-  });
+  const response = await fetch(url);
 
   if (!response.ok) return null;
-
-  const contentType = response.headers.get("content-type");
-
-  // ⚠️ se vier HTML → erro
-  if (contentType && contentType.includes("text/html")) {
-    console.log("Recebeu HTML em vez de PDF:", fileId);
-    return null;
-  }
 
   const buffer = await response.arrayBuffer();
   return Buffer.from(buffer);
 }
 
-// 🚀 ROTA ZIP
+// 🚀 GERAR ZIP
 app.post("/zip", async (req, res) => {
   try {
     const { arquivos } = req.body;
@@ -63,45 +89,28 @@ app.post("/zip", async (req, res) => {
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", "attachment; filename=certificados.zip");
 
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = archiver("zip");
     archive.pipe(res);
 
-    let adicionados = 0;
-
     for (const arq of arquivos) {
-      try {
-        const buffer = await baixarArquivoDrive(arq.id);
+      const buffer = await baixarArquivoDrive(arq.id);
+      if (!buffer) continue;
 
-        if (!buffer || buffer.length < 5000) {
-          console.log("Arquivo ignorado:", arq.id);
-          continue;
-        }
+      const nome = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`;
 
-        const nome = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`;
-
-        archive.append(buffer, { name: nome });
-        adicionados++;
-
-      } catch (e) {
-        console.log("Erro no arquivo:", arq.id);
-      }
-    }
-
-    if (adicionados === 0) {
-      console.log("⚠️ Nenhum arquivo válido encontrado");
+      archive.append(buffer, { name: nome });
     }
 
     await archive.finalize();
 
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: "Erro ao gerar ZIP" });
+    res.status(500).json({ erro: e.message });
   }
 });
 
 // TESTE
 app.get("/", (req, res) => {
-  res.send("API ZIP OK 🚀");
+  res.send("API OK 🚀");
 });
 
 app.listen(3000, () => console.log("Servidor rodando"));
