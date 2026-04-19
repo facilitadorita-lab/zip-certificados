@@ -1,14 +1,15 @@
 {
-  "name": "zip-api",
+  "name": "zip-certificados",
   "version": "1.0.0",
+  "description": "API de certificados",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "archiver": "^5.3.1",
     "express": "^4.18.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "pdf-parse": "^1.1.1"
   }
 }
