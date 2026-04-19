@@ -12,6 +12,8 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
+const LIMITE_POR_LOTE = 20; // 🔥 controla carga
+
 // 🔹 EXTRAIR DADOS
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
@@ -26,7 +28,7 @@ function extrairDados(nome) {
   };
 }
 
-// 🔹 VALIDAR DATA
+// 🔹 VALIDAR
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null };
 
@@ -76,10 +78,7 @@ async function processarPDF(fileId) {
     const soma = (erros[i] || 0) + (incertezas[i] || 0);
     if (soma > 0.5) aprovado = false;
 
-    pontos.push({
-      ponto: i + 1,
-      soma
-    });
+    pontos.push({ ponto: i + 1, soma });
   }
 
   return {
@@ -88,68 +87,70 @@ async function processarPDF(fileId) {
   };
 }
 
-// 🚀 ROTA TESTE
-app.get("/", (req, res) => {
-  res.send("API OK 🚀");
-});
-
-// 🚀 SYNC (ESSA É A QUE ESTÁ FALTANDO PRA VOCÊ)
+// 🚀 SYNC COMPLETO COM PAGINAÇÃO
 app.get("/sync", async (req, res) => {
   try {
-    // 🔹 já existentes
-    const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`
-      }
-    });
+    let pageToken = null;
+    let totalProcessados = 0;
 
-    const existentes = await existentesRes.json();
-    const ids = new Set(existentes.map(e => e.id));
+    do {
+      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
 
-    // 🔹 drive
-    const driveRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)&pageSize=1000`
-    );
+      const driveRes = await fetch(url);
+      const drive = await driveRes.json();
 
-    const drive = await driveRes.json();
+      const arquivos = drive.files || [];
 
-    const novos = (drive.files || []).filter(f => !ids.has(f.id));
-
-    const resultados = [];
-
-    for (const f of novos.slice(0, 10)) {
-      const base = extrairDados(f.name);
-      const proc = await processarPDF(f.id);
-      const val = verificarValidade(base.data);
-
-      const registro = {
-        id: f.id,
-        nome_original: base.nome_original,
-        dlt: base.dlt,
-        serie: base.serie,
-        data: base.data,
-        status: proc?.status || "ERRO",
-        validade: val.valido,
-        vencimento: val.vencimento,
-        pontos: proc?.pontos || []
-      };
-
-      await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-        method: "POST",
+      // 🔹 pegar já existentes
+      const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
         headers: {
           apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(registro)
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
       });
 
-      resultados.push(registro);
-    }
+      const existentes = await existentesRes.json();
+      const ids = new Set(existentes.map(e => e.id));
+
+      const novos = arquivos.filter(f => !ids.has(f.id));
+
+      // 🔥 PROCESSAR EM LOTE
+      for (const f of novos.slice(0, LIMITE_POR_LOTE)) {
+        const base = extrairDados(f.name);
+        const proc = await processarPDF(f.id);
+        const val = verificarValidade(base.data);
+
+        const registro = {
+          id: f.id,
+          nome_original: base.nome_original,
+          dlt: base.dlt,
+          serie: base.serie,
+          data: base.data,
+          status: proc?.status || "ERRO",
+          validade: val.valido,
+          vencimento: val.vencimento,
+          pontos: proc?.pontos || []
+        };
+
+        await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+          method: "POST",
+          headers: {
+            apikey: SUPABASE_KEY,
+            Authorization: `Bearer ${SUPABASE_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(registro)
+        });
+
+        totalProcessados++;
+      }
+
+      pageToken = drive.nextPageToken;
+
+    } while (pageToken);
 
     res.json({
-      novos_processados: resultados.length
+      processados: totalProcessados
     });
 
   } catch (e) {
@@ -160,9 +161,7 @@ app.get("/sync", async (req, res) => {
 // 🚀 LISTAR
 app.get("/certificados", async (req, res) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-    headers: {
-      apikey: SUPABASE_KEY
-    }
+    headers: { apikey: SUPABASE_KEY }
   });
 
   const data = await r.json();
