@@ -12,9 +12,9 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-const LIMITE_POR_LOTE = 20; // 🔥 controla carga
+const LIMITE_POR_LOTE = 20; // ⚠️ controle de carga
 
-// 🔹 EXTRAIR DADOS
+// 🔹 EXTRAIR DADOS DO NOME
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
 
@@ -28,7 +28,7 @@ function extrairDados(nome) {
   };
 }
 
-// 🔹 VALIDAR
+// 🔹 VALIDAR DATA
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null };
 
@@ -44,52 +44,91 @@ function verificarValidade(dataISO) {
 
 // 🔹 PROCESSAR PDF
 async function processarPDF(fileId) {
-  const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-  const res = await fetch(url);
+  try {
+    const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    const res = await fetch(url);
 
-  if (!res.ok) return null;
+    if (!res.ok) return null;
 
-  const buffer = Buffer.from(await res.arrayBuffer());
-  const data = await pdf(buffer);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const data = await pdf(buffer);
 
-  const linhas = data.text.split("\n");
+    const linhas = data.text.split("\n");
 
-  const erros = [];
-  const incertezas = [];
+    const erros = [];
+    const incertezas = [];
 
-  for (let l of linhas) {
-    const m = l.match(/-?\d+,\d+\s+(-?\d+,\d+)/);
-    if (m) erros.push(Math.abs(parseFloat(m[1].replace(",", "."))));
-  }
-
-  let capturar = false;
-  for (let l of linhas) {
-    if (l.includes("Incerteza")) capturar = true;
-    if (capturar) {
-      const m = l.match(/\d+,\d+/);
-      if (m) incertezas.push(parseFloat(m[0].replace(",", ".")));
+    for (let l of linhas) {
+      const m = l.match(/-?\d+,\d+\s+(-?\d+,\d+)/);
+      if (m) erros.push(Math.abs(parseFloat(m[1].replace(",", "."))));
     }
+
+    let capturar = false;
+    for (let l of linhas) {
+      if (l.includes("Incerteza")) capturar = true;
+      if (capturar) {
+        const m = l.match(/\d+,\d+/);
+        if (m) incertezas.push(parseFloat(m[0].replace(",", ".")));
+      }
+    }
+
+    let aprovado = true;
+    const pontos = [];
+
+    for (let i = 0; i < 4; i++) {
+      const soma = (erros[i] || 0) + (incertezas[i] || 0);
+      if (soma > 0.5) aprovado = false;
+
+      pontos.push({ ponto: i + 1, soma });
+    }
+
+    return {
+      status: aprovado ? "APROVADO" : "REPROVADO",
+      pontos
+    };
+
+  } catch (e) {
+    return null;
   }
-
-  let aprovado = true;
-  const pontos = [];
-
-  for (let i = 0; i < 4; i++) {
-    const soma = (erros[i] || 0) + (incertezas[i] || 0);
-    if (soma > 0.5) aprovado = false;
-
-    pontos.push({ ponto: i + 1, soma });
-  }
-
-  return {
-    status: aprovado ? "APROVADO" : "REPROVADO",
-    pontos
-  };
 }
 
-// 🚀 SYNC COMPLETO COM PAGINAÇÃO
+// 🚀 ROTA TESTE
+app.get("/", (req, res) => {
+  res.send("API OK 🚀");
+});
+
+// 🚀 STATUS DO PROCESSAMENTO
+app.get("/status", async (req, res) => {
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/controle_sync`, {
+      headers: { apikey: SUPABASE_KEY }
+    });
+
+    const data = await r.json();
+    res.json(data[0] || {});
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// 🚀 SYNC AUTOMÁTICO COM CONTROLE
 app.get("/sync", async (req, res) => {
   try {
+
+    // 🔹 marcar como rodando
+    await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        em_execucao: true,
+        ultima_execucao: new Date()
+      })
+    });
+
     let pageToken = null;
     let totalProcessados = 0;
 
@@ -101,7 +140,7 @@ app.get("/sync", async (req, res) => {
 
       const arquivos = drive.files || [];
 
-      // 🔹 pegar já existentes
+      // 🔹 buscar existentes
       const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
         headers: {
           apikey: SUPABASE_KEY,
@@ -114,7 +153,7 @@ app.get("/sync", async (req, res) => {
 
       const novos = arquivos.filter(f => !ids.has(f.id));
 
-      // 🔥 PROCESSAR EM LOTE
+      // 🔥 processar em lote controlado
       for (const f of novos.slice(0, LIMITE_POR_LOTE)) {
         const base = extrairDados(f.name);
         const proc = await processarPDF(f.id);
@@ -149,6 +188,20 @@ app.get("/sync", async (req, res) => {
 
     } while (pageToken);
 
+    // 🔹 finalizar
+    await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        total_processados: totalProcessados,
+        em_execucao: false
+      })
+    });
+
     res.json({
       processados: totalProcessados
     });
@@ -158,7 +211,7 @@ app.get("/sync", async (req, res) => {
   }
 });
 
-// 🚀 LISTAR
+// 🚀 LISTAR CERTIFICADOS
 app.get("/certificados", async (req, res) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
     headers: { apikey: SUPABASE_KEY }
