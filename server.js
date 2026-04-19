@@ -15,11 +15,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🔹 CONFIG (PREENCHER)
+// 🔹 CONFIG
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-// 🔹 EXTRAI DADOS DO NOME
+// 🔹 EXTRAI DADOS
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
 
@@ -33,28 +33,36 @@ function extrairDados(nome) {
   };
 }
 
-// 🚀 LISTAR ARQUIVOS
+// 🚀 LISTAR TODOS OS ARQUIVOS (COM PAGINAÇÃO)
 app.get("/arquivos", async (req, res) => {
   try {
-    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)`;
+    let arquivos = [];
+    let pageToken = "";
 
-    const response = await fetch(url);
-    const data = await response.json();
+    do {
+      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000&pageToken=${pageToken}`;
 
-    // 🔥 DEBUG MELHORADO
-    if (!data.files) {
-      return res.status(500).json({
-        erro: "Erro ao buscar arquivos no Google Drive",
-        detalhe: data
-      });
-    }
+      const response = await fetch(url);
+      const data = await response.json();
 
-    const arquivos = data.files.map(f => ({
+      if (!data.files) {
+        return res.status(500).json({
+          erro: "Erro ao buscar arquivos no Drive",
+          detalhe: data
+        });
+      }
+
+      arquivos = arquivos.concat(data.files);
+      pageToken = data.nextPageToken || "";
+
+    } while (pageToken);
+
+    const resultado = arquivos.map(f => ({
       id: f.id,
       ...extrairDados(f.name)
     }));
 
-    res.json(arquivos);
+    res.json(resultado);
 
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -73,7 +81,7 @@ function formatarDLT(dlt) {
   return `DLT-${numero.padStart(4, "0")}`;
 }
 
-// 🔹 DOWNLOAD DO DRIVE (SEM API)
+// 🔹 DOWNLOAD
 async function baixarArquivoDrive(fileId) {
   const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
   const response = await fetch(url);
@@ -84,7 +92,7 @@ async function baixarArquivoDrive(fileId) {
   return Buffer.from(buffer);
 }
 
-// 🚀 GERAR ZIP
+// 🚀 ZIP
 app.post("/zip", async (req, res) => {
   try {
     const { arquivos } = req.body;
@@ -115,7 +123,7 @@ app.post("/zip", async (req, res) => {
   }
 });
 
-// 🧪 TESTE
+// TESTE
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
