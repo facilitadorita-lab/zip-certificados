@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-// 🔥 CORS (obrigatório pro Lovable)
+// 🔥 CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "*");
@@ -15,13 +15,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🔹 CONFIG (ALTERAR AQUI)
+// 🔹 CONFIG (PREENCHER)
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
-const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_?usp=drive_link";
+const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-// 🔹 EXTRAIR DADOS DO NOME
+// 🔹 EXTRAI DADOS DO NOME
 function extrairDados(nome) {
-  // Ex: DLT-0570_37182979_05.02.2026.pdf
   const partes = nome.replace(".pdf", "").split("_");
 
   return {
@@ -34,13 +33,21 @@ function extrairDados(nome) {
   };
 }
 
-// 🚀 LISTAR ARQUIVOS DO DRIVE
+// 🚀 LISTAR ARQUIVOS
 app.get("/arquivos", async (req, res) => {
   try {
-    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)&pageSize=1000`;
+    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)`;
 
     const response = await fetch(url);
     const data = await response.json();
+
+    // 🔥 DEBUG MELHORADO
+    if (!data.files) {
+      return res.status(500).json({
+        erro: "Erro ao buscar arquivos no Google Drive",
+        detalhe: data
+      });
+    }
 
     const arquivos = data.files.map(f => ({
       id: f.id,
@@ -66,7 +73,7 @@ function formatarDLT(dlt) {
   return `DLT-${numero.padStart(4, "0")}`;
 }
 
-// 🔹 BAIXAR DO DRIVE
+// 🔹 DOWNLOAD DO DRIVE (SEM API)
 async function baixarArquivoDrive(fileId) {
   const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
   const response = await fetch(url);
@@ -108,7 +115,7 @@ app.post("/zip", async (req, res) => {
   }
 });
 
-// TESTE
+// 🧪 TESTE
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
