@@ -1,30 +1,23 @@
 import express from "express";
-import archiver from "archiver";
 import fetch from "node-fetch";
+import pdf from "pdf-parse";
 
 const app = express();
 app.use(express.json());
 
-// 🔥 CORS
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "*");
-  res.header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
 // 🔹 CONFIG
+const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
+
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-// 🔹 EXTRAI DADOS
+// 🔹 EXTRAIR DADOS
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
 
   return {
-    nome,
+    nome_original: nome,
     dlt: partes[0]?.replace("DLT-", "") || "",
     serie: partes[1] || "",
     data: partes[2]
@@ -33,99 +26,147 @@ function extrairDados(nome) {
   };
 }
 
-// 🚀 LISTAR TODOS OS ARQUIVOS (COM PAGINAÇÃO)
-app.get("/arquivos", async (req, res) => {
-  try {
-    let arquivos = [];
-    let pageToken = "";
+// 🔹 VALIDAR DATA
+function verificarValidade(dataISO) {
+  if (!dataISO) return { valido: false, vencimento: null };
 
-    do {
-      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000&pageToken=${pageToken}`;
+  const d = new Date(dataISO);
+  const v = new Date(d);
+  v.setFullYear(v.getFullYear() + 1);
 
-      const response = await fetch(url);
-      const data = await response.json();
-
-      if (!data.files) {
-        return res.status(500).json({
-          erro: "Erro ao buscar arquivos no Drive",
-          detalhe: data
-        });
-      }
-
-      arquivos = arquivos.concat(data.files);
-      pageToken = data.nextPageToken || "";
-
-    } while (pageToken);
-
-    const resultado = arquivos.map(f => ({
-      id: f.id,
-      ...extrairDados(f.name)
-    }));
-
-    res.json(resultado);
-
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// 🔹 FORMATADORES
-function formatarData(dataISO) {
-  if (!dataISO) return "sem-data";
-  const [ano, mes, dia] = dataISO.split("-");
-  return `${dia}.${mes}.${ano}`;
+  return {
+    valido: new Date() <= v,
+    vencimento: v.toISOString().split("T")[0]
+  };
 }
 
-function formatarDLT(dlt) {
-  const numero = dlt.toString().replace(/\D/g, "");
-  return `DLT-${numero.padStart(4, "0")}`;
-}
-
-// 🔹 DOWNLOAD
-async function baixarArquivoDrive(fileId) {
+// 🔹 PROCESSAR PDF
+async function processarPDF(fileId) {
   const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-  const response = await fetch(url);
+  const res = await fetch(url);
 
-  if (!response.ok) return null;
+  if (!res.ok) return null;
 
-  const buffer = await response.arrayBuffer();
-  return Buffer.from(buffer);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const data = await pdf(buffer);
+
+  const linhas = data.text.split("\n");
+
+  const erros = [];
+  const incertezas = [];
+
+  for (let l of linhas) {
+    const m = l.match(/-?\d+,\d+\s+(-?\d+,\d+)/);
+    if (m) erros.push(Math.abs(parseFloat(m[1].replace(",", "."))));
+  }
+
+  let capturar = false;
+  for (let l of linhas) {
+    if (l.includes("Incerteza")) capturar = true;
+    if (capturar) {
+      const m = l.match(/\d+,\d+/);
+      if (m) incertezas.push(parseFloat(m[0].replace(",", ".")));
+    }
+  }
+
+  let aprovado = true;
+  const pontos = [];
+
+  for (let i = 0; i < 4; i++) {
+    const soma = (erros[i] || 0) + (incertezas[i] || 0);
+    if (soma > 0.5) aprovado = false;
+
+    pontos.push({
+      ponto: i + 1,
+      soma
+    });
+  }
+
+  return {
+    status: aprovado ? "APROVADO" : "REPROVADO",
+    pontos
+  };
 }
 
-// 🚀 ZIP
-app.post("/zip", async (req, res) => {
-  try {
-    const { arquivos } = req.body;
-
-    if (!arquivos || arquivos.length === 0) {
-      return res.status(400).json({ erro: "Nenhum arquivo enviado" });
-    }
-
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", "attachment; filename=certificados.zip");
-
-    const archive = archiver("zip");
-    archive.pipe(res);
-
-    for (const arq of arquivos) {
-      const buffer = await baixarArquivoDrive(arq.id);
-      if (!buffer) continue;
-
-      const nome = `${formatarDLT(arq.dlt)}_${arq.serie}_${formatarData(arq.data)}.pdf`;
-
-      archive.append(buffer, { name: nome });
-    }
-
-    await archive.finalize();
-
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// TESTE
+// 🚀 ROTA TESTE
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
+});
+
+// 🚀 SYNC (ESSA É A QUE ESTÁ FALTANDO PRA VOCÊ)
+app.get("/sync", async (req, res) => {
+  try {
+    // 🔹 já existentes
+    const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`
+      }
+    });
+
+    const existentes = await existentesRes.json();
+    const ids = new Set(existentes.map(e => e.id));
+
+    // 🔹 drive
+    const driveRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)&pageSize=1000`
+    );
+
+    const drive = await driveRes.json();
+
+    const novos = (drive.files || []).filter(f => !ids.has(f.id));
+
+    const resultados = [];
+
+    for (const f of novos.slice(0, 10)) {
+      const base = extrairDados(f.name);
+      const proc = await processarPDF(f.id);
+      const val = verificarValidade(base.data);
+
+      const registro = {
+        id: f.id,
+        nome_original: base.nome_original,
+        dlt: base.dlt,
+        serie: base.serie,
+        data: base.data,
+        status: proc?.status || "ERRO",
+        validade: val.valido,
+        vencimento: val.vencimento,
+        pontos: proc?.pontos || []
+      };
+
+      await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(registro)
+      });
+
+      resultados.push(registro);
+    }
+
+    res.json({
+      novos_processados: resultados.length
+    });
+
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// 🚀 LISTAR
+app.get("/certificados", async (req, res) => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+    headers: {
+      apikey: SUPABASE_KEY
+    }
+  });
+
+  const data = await r.json();
+  res.json(data);
 });
 
 app.listen(3000, () => console.log("Servidor rodando"));
