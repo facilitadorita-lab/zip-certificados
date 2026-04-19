@@ -16,8 +16,8 @@ app.use((req, res, next) => {
 });
 
 // 🔹 CONFIG (ALTERAR AQUI)
-const GOOGLE_API_KEY = "COLE_SUA_API_KEY_AQUI";
-const FOLDER_ID = "COLE_ID_DA_PASTA_AQUI";
+const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
+const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_?usp=drive_link";
 
 // 🔹 EXTRAIR DADOS DO NOME
 function extrairDados(nome) {
