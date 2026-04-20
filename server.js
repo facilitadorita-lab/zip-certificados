@@ -12,12 +12,11 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-const LIMITE_POR_LOTE = 20;
+const LIMITE_POR_LOTE = 20; // controle de carga
 
 // 🔹 EXTRAIR DADOS
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
-
   return {
     nome_original: nome,
     dlt: partes[0]?.replace("DLT-", "") || "",
@@ -31,11 +30,9 @@ function extrairDados(nome) {
 // 🔹 VALIDAR DATA
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null };
-
   const d = new Date(dataISO);
   const v = new Date(d);
   v.setFullYear(v.getFullYear() + 1);
-
   return {
     valido: new Date() <= v,
     vencimento: v.toISOString().split("T")[0]
@@ -47,14 +44,12 @@ async function processarPDF(fileId) {
   try {
     const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
     const res = await fetch(url);
-
     if (!res.ok) return null;
 
     const buffer = Buffer.from(await res.arrayBuffer());
     const data = await pdf(buffer);
 
     const linhas = data.text.split("\n");
-
     const erros = [];
     const incertezas = [];
 
@@ -78,7 +73,6 @@ async function processarPDF(fileId) {
     for (let i = 0; i < 4; i++) {
       const soma = (erros[i] || 0) + (incertezas[i] || 0);
       if (soma > 0.5) aprovado = false;
-
       pontos.push({ ponto: i + 1, soma });
     }
 
@@ -86,18 +80,17 @@ async function processarPDF(fileId) {
       status: aprovado ? "APROVADO" : "REPROVADO",
       pontos
     };
-
   } catch {
     return null;
   }
 }
 
-// 🚀 TESTE
+// 🔹 ROTA TESTE
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
 
-// 🚀 STATUS (CORRIGIDO)
+// 🔹 STATUS
 app.get("/status", async (req, res) => {
   try {
     const r = await fetch(
@@ -109,94 +102,123 @@ app.get("/status", async (req, res) => {
         }
       }
     );
-
     const data = await r.json();
-
     res.json(data[0] || {});
-    
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
 
-// 🚀 SYNC
+// 🔹 SYNC INTELIGENTE (AUTO-PARA + SÓ PROCESSA SE HOUVER NOVOS)
 app.get("/sync", async (req, res) => {
   try {
-
-    // 🔹 MARCAR COMO EXECUTANDO
-    await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        em_execucao: true,
-        ultima_execucao: new Date()
-      })
-    });
-
-    let pageToken = null;
-    let totalProcessados = 0;
-
-    do {
-      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
-
-      const driveRes = await fetch(url);
-      const drive = await driveRes.json();
-
-      const arquivos = drive.files || [];
-
-      // 🔹 BUSCAR EXISTENTES
-      const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+    // 1) Buscar existentes UMA vez (evita repetir por página)
+    const existentesRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=id`,
+      {
         headers: {
           apikey: SUPABASE_KEY,
           Authorization: `Bearer ${SUPABASE_KEY}`
         }
-      });
+      }
+    );
+    const existentes = await existentesRes.json();
+    const idsExistentes = new Set(existentes.map(e => e.id));
 
-      const existentes = await existentesRes.json();
-      const ids = new Set(existentes.map(e => e.id));
+    let pageToken = null;
+    let totalProcessados = 0;
+    let encontrouNovos = false;
 
-      const novos = arquivos.filter(f => !ids.has(f.id));
+    do {
+      // 2) Listar Drive com paginação
+      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
 
-      // 🔥 PROCESSAR LOTE
-      for (const f of novos.slice(0, LIMITE_POR_LOTE)) {
-        const base = extrairDados(f.name);
-        const proc = await processarPDF(f.id);
-        const val = verificarValidade(base.data);
+      const driveRes = await fetch(url);
+      const drive = await driveRes.json();
+      const arquivos = drive.files || [];
 
-        const registro = {
-          id: f.id,
-          nome_original: base.nome_original,
-          dlt: base.dlt,
-          serie: base.serie,
-          data: base.data,
-          status: proc?.status || "ERRO",
-          validade: val.valido,
-          vencimento: val.vencimento,
-          pontos: proc?.pontos || []
-        };
+      // 3) Filtrar novos
+      const novos = arquivos.filter(f => !idsExistentes.has(f.id));
 
-        await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-          method: "POST",
+      // 4) Se achou novos em qualquer página → marcar e começar processamento
+      if (novos.length > 0) {
+        encontrouNovos = true;
+
+        // marcar execução
+        await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
+          method: "PATCH",
           headers: {
             apikey: SUPABASE_KEY,
             Authorization: `Bearer ${SUPABASE_KEY}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(registro)
+          body: JSON.stringify({
+            em_execucao: true,
+            ultima_execucao: new Date()
+          })
         });
 
-        totalProcessados++;
+        // 5) Processar só um lote por chamada (controle)
+        for (const f of novos.slice(0, LIMITE_POR_LOTE)) {
+          const base = extrairDados(f.name);
+          const proc = await processarPDF(f.id);
+          const val = verificarValidade(base.data);
+
+          const registro = {
+            id: f.id,
+            nome_original: base.nome_original,
+            dlt: base.dlt,
+            serie: base.serie,
+            data: base.data,
+            status: proc?.status || "ERRO",
+            validade: val.valido,
+            vencimento: val.vencimento,
+            pontos: proc?.pontos || []
+          };
+
+          await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+            method: "POST",
+            headers: {
+              apikey: SUPABASE_KEY,
+              Authorization: `Bearer ${SUPABASE_KEY}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(registro)
+          });
+
+          idsExistentes.add(f.id); // evita duplicar no mesmo ciclo
+          totalProcessados++;
+        }
+
+        // já processou um lote → parar este ciclo (próxima chamada continua)
+        break;
       }
 
       pageToken = drive.nextPageToken;
 
     } while (pageToken);
 
-    // 🔹 FINALIZAR
+    // 6) Se NÃO encontrou novos → auto-parar (sem custo)
+    if (!encontrouNovos) {
+      await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          em_execucao: false
+        })
+      });
+
+      return res.json({
+        mensagem: "Nenhum arquivo novo. Sync encerrado.",
+        processados: 0
+      });
+    }
+
+    // 7) Finalizar este ciclo
     await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
       method: "PATCH",
       headers: {
@@ -211,6 +233,7 @@ app.get("/sync", async (req, res) => {
     });
 
     res.json({
+      mensagem: "Lote processado",
       processados: totalProcessados
     });
 
@@ -219,7 +242,7 @@ app.get("/sync", async (req, res) => {
   }
 });
 
-// 🚀 LISTAR
+// 🔹 LISTAR
 app.get("/certificados", async (req, res) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
     headers: {
@@ -227,7 +250,6 @@ app.get("/certificados", async (req, res) => {
       Authorization: `Bearer ${SUPABASE_KEY}`
     }
   });
-
   const data = await r.json();
   res.json(data);
 });
