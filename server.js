@@ -255,3 +255,44 @@ app.get("/certificados", async (req, res) => {
 });
 
 app.listen(3000, () => console.log("Servidor rodando 🚀"));
+app.get("/check-novos", async (req, res) => {
+  try {
+    const existentesRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=id`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    const existentes = await existentesRes.json();
+    const idsExistentes = new Set(existentes.map(e => e.id));
+
+    let pageToken = null;
+    let totalNovos = 0;
+
+    do {
+      const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
+
+      const driveRes = await fetch(url);
+      const drive = await driveRes.json();
+
+      const arquivos = drive.files || [];
+
+      const novos = arquivos.filter(f => !idsExistentes.has(f.id));
+      totalNovos += novos.length;
+
+      pageToken = drive.nextPageToken;
+
+    } while (pageToken);
+
+    res.json({
+      novos: totalNovos
+    });
+
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
