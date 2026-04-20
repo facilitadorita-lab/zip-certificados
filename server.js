@@ -56,6 +56,75 @@ async function processarPDF(fileId) {
     const texto = data.text || "";
     const linhas = texto.split("\n");
 
+    const erros = [];
+    const incertezas = [];
+
+    let capturar = false;
+
+    for (let linha of linhas) {
+      const l = linha.toLowerCase();
+
+      // 🔥 INICIO DA TABELA
+      if (l.includes("erro") && l.includes("incerteza")) {
+        capturar = true;
+        continue;
+      }
+
+      // 🔥 PARAR quando acabar tabela
+      if (capturar && linha.trim() === "") {
+        break;
+      }
+
+      if (capturar) {
+        const matches = linha.match(/-?\d+,\d+/g);
+
+        if (matches && matches.length >= 2) {
+          const erro = Math.abs(parseFloat(matches[0].replace(",", ".")));
+          const inc = Math.abs(parseFloat(matches[1].replace(",", ".")));
+
+          erros.push(erro);
+          incertezas.push(inc);
+        }
+      }
+    }
+
+    // 🔥 VALIDAÇÃO
+    if (erros.length === 0) {
+      console.log("❌ Não encontrou tabela de erro/incerteza");
+      return {
+        status: "ERRO",
+        pontos: []
+      };
+    }
+
+    let aprovado = true;
+    const pontos = [];
+
+    for (let i = 0; i < erros.length; i++) {
+      const erro = erros[i];
+      const inc = incertezas[i];
+      const soma = erro + inc;
+
+      if (soma > 0.5) aprovado = false;
+
+      pontos.push({
+        ponto: i + 1,
+        erro,
+        incerteza: inc,
+        soma
+      });
+    }
+
+    return {
+      status: aprovado ? "APROVADO" : "REPROVADO",
+      pontos
+    };
+
+  } catch (e) {
+    console.log("Erro ao processar PDF:", e.message);
+    return null;
+  }
+}
     // 🔹 FILTRA LINHAS COM NÚMEROS
     const linhasValidas = linhas.filter(l =>
       /-?\d+,\d+/.test(l) && l.length < 50
