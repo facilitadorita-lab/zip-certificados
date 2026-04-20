@@ -12,9 +12,9 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-const LIMITE_POR_LOTE = 25;
+const LIMITE_POR_LOTE = 20;
 
-// 🔹 EXTRAIR DADOS
+// 🔹 EXTRAIR DADOS DO NOME
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
 
@@ -42,7 +42,7 @@ function verificarValidade(dataISO) {
   };
 }
 
-// 🔹 PROCESSAR PDF (COM ERRO + INCERTEZA + SOMA)
+// 🔥 PROCESSAR PDF (ROBUSTO E GRATUITO)
 async function processarPDF(fileId) {
   try {
     const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
@@ -53,52 +53,66 @@ async function processarPDF(fileId) {
     const buffer = Buffer.from(await res.arrayBuffer());
     const data = await pdf(buffer);
 
-    const linhas = data.text.split("\n");
+    const texto = data.text || "";
+    const linhas = texto.split("\n");
 
-    const erros = [];
-    const incertezas = [];
+    // 🔹 FILTRA LINHAS COM NÚMEROS
+    const linhasValidas = linhas.filter(l =>
+      /-?\d+,\d+/.test(l) && l.length < 50
+    );
 
-    // 🔹 ERROS
-    for (let l of linhas) {
-      const m = l.match(/-?\d+,\d+\s+(-?\d+,\d+)/);
-      if (m) {
-        const valor = parseFloat(m[1].replace(",", "."));
-        erros.push(Math.abs(valor));
-      }
-    }
+    // 🔹 EXTRAI NÚMEROS
+    const valores = [];
 
-    // 🔹 INCERTEZAS
-    let capturar = false;
-    for (let l of linhas) {
-      if (l.toLowerCase().includes("incerteza")) capturar = true;
+    for (let linha of linhasValidas) {
+      const matches = linha.match(/-?\d+,\d+/g);
+      if (matches) {
+        for (let m of matches) {
+          const num = Math.abs(parseFloat(m.replace(",", ".")));
 
-      if (capturar) {
-        const m = l.match(/-?\d+,\d+/);
-        if (m) {
-          const valor = parseFloat(m[0].replace(",", "."));
-          incertezas.push(Math.abs(valor));
+          // 🔥 FILTRO INTELIGENTE (evita datas tipo 2026)
+          if (num <= 2) {
+            valores.push(num);
+          }
         }
       }
     }
 
-    // 🔥 CÁLCULO COMPLETO
+    // 🔹 VALIDAÇÃO
+    if (valores.length < 4) {
+      console.log("❌ Não encontrou dados válidos no PDF");
+      return {
+        status: "ERRO",
+        pontos: []
+      };
+    }
+
+    // 🔹 SEPARAÇÃO ERRO / INCERTEZA
+    const erros = [];
+    const incertezas = [];
+
+    for (let i = 0; i < valores.length; i += 2) {
+      erros.push(valores[i]);
+      incertezas.push(valores[i + 1] || 0);
+    }
+
+    // 🔹 CÁLCULO FINAL
     let aprovado = true;
     const pontos = [];
 
-    const totalPontos = Math.min(erros.length, incertezas.length);
+    const totalPontos = Math.min(4, erros.length, incertezas.length);
 
     for (let i = 0; i < totalPontos; i++) {
-      const erro = erros[i] || 0;
-      const incerteza = incertezas[i] || 0;
-
-      const soma = erro + incerteza;
+      const erro = erros[i];
+      const inc = incertezas[i];
+      const soma = erro + inc;
 
       if (soma > 0.5) aprovado = false;
 
       pontos.push({
         ponto: i + 1,
         erro,
-        incerteza,
+        incerteza: inc,
         soma
       });
     }
@@ -108,7 +122,8 @@ async function processarPDF(fileId) {
       pontos
     };
 
-  } catch {
+  } catch (e) {
+    console.log("Erro ao processar PDF:", e.message);
     return null;
   }
 }
