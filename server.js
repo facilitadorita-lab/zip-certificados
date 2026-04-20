@@ -12,9 +12,9 @@ const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
-const LIMITE_POR_LOTE = 20; // ⚠️ controle de carga
+const LIMITE_POR_LOTE = 20;
 
-// 🔹 EXTRAIR DADOS DO NOME
+// 🔹 EXTRAIR DADOS
 function extrairDados(nome) {
   const partes = nome.replace(".pdf", "").split("_");
 
@@ -87,35 +87,43 @@ async function processarPDF(fileId) {
       pontos
     };
 
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
-// 🚀 ROTA TESTE
+// 🚀 TESTE
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
 
-// 🚀 STATUS DO PROCESSAMENTO
+// 🚀 STATUS (CORRIGIDO)
 app.get("/status", async (req, res) => {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/controle_sync`, {
-      headers: { apikey: SUPABASE_KEY }
-    });
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1&select=*`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
 
     const data = await r.json();
+
     res.json(data[0] || {});
+    
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
 
-// 🚀 SYNC AUTOMÁTICO COM CONTROLE
+// 🚀 SYNC
 app.get("/sync", async (req, res) => {
   try {
 
-    // 🔹 marcar como rodando
+    // 🔹 MARCAR COMO EXECUTANDO
     await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
       method: "PATCH",
       headers: {
@@ -140,7 +148,7 @@ app.get("/sync", async (req, res) => {
 
       const arquivos = drive.files || [];
 
-      // 🔹 buscar existentes
+      // 🔹 BUSCAR EXISTENTES
       const existentesRes = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
         headers: {
           apikey: SUPABASE_KEY,
@@ -153,7 +161,7 @@ app.get("/sync", async (req, res) => {
 
       const novos = arquivos.filter(f => !ids.has(f.id));
 
-      // 🔥 processar em lote controlado
+      // 🔥 PROCESSAR LOTE
       for (const f of novos.slice(0, LIMITE_POR_LOTE)) {
         const base = extrairDados(f.name);
         const proc = await processarPDF(f.id);
@@ -188,7 +196,7 @@ app.get("/sync", async (req, res) => {
 
     } while (pageToken);
 
-    // 🔹 finalizar
+    // 🔹 FINALIZAR
     await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
       method: "PATCH",
       headers: {
@@ -211,14 +219,17 @@ app.get("/sync", async (req, res) => {
   }
 });
 
-// 🚀 LISTAR CERTIFICADOS
+// 🚀 LISTAR
 app.get("/certificados", async (req, res) => {
   const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-    headers: { apikey: SUPABASE_KEY }
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`
+    }
   });
 
   const data = await r.json();
   res.json(data);
 });
 
-app.listen(3000, () => console.log("Servidor rodando"));
+app.listen(3000, () => console.log("Servidor rodando 🚀"));
