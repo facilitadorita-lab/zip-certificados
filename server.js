@@ -5,7 +5,9 @@ import pdf from "pdf-parse";
 const app = express();
 app.use(express.json());
 
+// =========================
 // CONFIG
+// =========================
 const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
 
@@ -14,6 +16,9 @@ const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
 const LIMITE_POR_LOTE = 50;
 
+// =========================
+// HELPERS
+// =========================
 function supabaseHeaders() {
   return {
     apikey: SUPABASE_KEY,
@@ -57,45 +62,97 @@ function normalizarTexto(texto) {
 }
 
 function parseNumeroBR(valor) {
-  return Math.abs(parseFloat(valor.replace(",", ".")));
+  return parseFloat(valor.replace(",", "."));
 }
 
-function extrairErrosELinhas(texto) {
+function absNumeroBR(valor) {
+  return Math.abs(parseNumeroBR(valor));
+}
+
+// =========================
+// PARSER DO PDF
+// =========================
+
+// 1) Extrai os ERROS da tabela principal.
+// No seu PDF, o erro é o número imediatamente antes do 2,00.
+function extrairErros(texto) {
   const linhas = normalizarTexto(texto).split("\n");
   const erros = [];
   const linhasCapturadas = [];
 
   for (const linha of linhas) {
-    const temK = linha.includes("2,00");
-    const numeros = linha.match(/-?\d+,\d+/g);
+    if (!linha.includes("2,00")) continue;
 
-    if (!temK || !numeros || numeros.length < 3) continue;
+    const numeros = linha.match(/-?\d+,\d+/g);
+    if (!numeros || numeros.length < 2) continue;
 
     const idxK = numeros.findIndex(n => n === "2,00");
     if (idxK < 1) continue;
 
     const erroRaw = numeros[idxK - 1];
-    const erro = parseNumeroBR(erroRaw);
+    const erro = Math.abs(parseNumeroBR(erroRaw));
 
+    // filtro defensivo
     if (erro <= 2) {
-      erros.push(erro);
+      erros.push(Number(erro.toFixed(2)));
       linhasCapturadas.push(linha);
     }
+
+    if (erros.length === 4) break;
   }
 
   return { erros, linhasCapturadas };
 }
 
+// 2) Extrai as 4 INCERTEZAS da seção "Incerteza da Medição Expandida".
 function extrairIncertezas(texto) {
   const linhas = normalizarTexto(texto).split("\n");
   const incertezas = [];
-
   let capturar = false;
 
   for (const linha of linhas) {
-    const l = linha.toLowerCase();
+    const l = linha.toLowerCase().trim();
 
-    if (l.includes("incerteza da") || l.includes("incerteza expandida")) {
+    if (l.includes("incerteza da")) {
+      capturar = true;
+      continue;
+    }
+
+    if (!capturar) continue;
+
+    if (l.includes("medição expandida")) continue;
+
+    const m = linha.match(/^\s*(-?\d+,\d+)\s*$/);
+    if (m) {
+      const valor = Math.abs(parseNumeroBR(m[1]));
+
+      if (valor <= 2) {
+        incertezas.push(Number(valor.toFixed(2)));
+      }
+
+      if (incertezas.length === 4) break;
+    }
+  }
+
+  return incertezas;
+}
+
+// 3) Extrai os 4 pontos de AQUECIMENTO.
+// No seu PDF eles aparecem na seção:
+// Aquecimento
+// -20,00
+// 0,00
+// 15,00
+// 60,00
+function extrairAquecimentos(texto) {
+  const linhas = normalizarTexto(texto).split("\n");
+  const aquecimentos = [];
+  let capturar = false;
+
+  for (const linha of linhas) {
+    const l = linha.toLowerCase().trim();
+
+    if (l === "aquecimento") {
       capturar = true;
       continue;
     }
@@ -106,15 +163,16 @@ function extrairIncertezas(texto) {
     if (m) {
       const valor = parseNumeroBR(m[1]);
 
-      if (valor <= 2) {
-        incertezas.push(valor);
+      // faixa esperada de temperatura do seu certificado
+      if (valor >= -100 && valor <= 200) {
+        aquecimentos.push(Number(valor.toFixed(2)));
       }
 
-      if (incertezas.length === 4) break;
+      if (aquecimentos.length === 4) break;
     }
   }
 
-  return incertezas;
+  return aquecimentos;
 }
 
 async function processarPDF(fileId) {
@@ -135,12 +193,6 @@ async function processarPDF(fileId) {
 
     const texto = normalizarTexto(data.text || "");
 
-    console.log("===== PDF DEBUG START =====");
-    console.log("FILE ID:", fileId);
-    console.log("TEXTO EXTRAIDO:");
-    console.log(texto.slice(0, 4000));
-    console.log("===== PDF DEBUG END =====");
-
     if (!texto) {
       return {
         status: "ERRO",
@@ -149,17 +201,19 @@ async function processarPDF(fileId) {
       };
     }
 
-    const { erros, linhasCapturadas } = extrairErrosELinhas(texto);
+    const { erros, linhasCapturadas } = extrairErros(texto);
     const incertezas = extrairIncertezas(texto);
+    const aquecimentos = extrairAquecimentos(texto);
 
-    if (erros.length < 4 || incertezas.length < 4) {
+    if (erros.length < 4 || incertezas.length < 4 || aquecimentos.length < 4) {
       return {
         status: "ERRO",
         pontos: [],
         debug: {
-          motivo: "Não encontrou 4 erros e 4 incertezas",
+          motivo: "Não encontrou 4 erros, 4 incertezas e 4 pontos de aquecimento",
           erros_encontrados: erros,
           incertezas_encontradas: incertezas,
+          aquecimentos_encontrados: aquecimentos,
           linhas_erros: linhasCapturadas
         }
       };
@@ -169,17 +223,19 @@ async function processarPDF(fileId) {
     const pontos = [];
 
     for (let i = 0; i < 4; i++) {
+      const aquecimento = aquecimentos[i];
       const erro = Math.abs(erros[i]);
       const incerteza = Math.abs(incertezas[i]);
-      const soma = erro + incerteza;
+      const soma = Number((erro + incerteza).toFixed(2));
 
       if (soma > 0.5) aprovado = false;
 
       pontos.push({
         ponto: i + 1,
+        aquecimento: Number(aquecimento.toFixed(2)),
         erro: Number(erro.toFixed(2)),
         incerteza: Number(incerteza.toFixed(2)),
-        soma: Number(soma.toFixed(2))
+        soma
       });
     }
 
@@ -189,6 +245,7 @@ async function processarPDF(fileId) {
       debug: {
         erros_encontrados: erros,
         incertezas_encontradas: incertezas,
+        aquecimentos_encontrados: aquecimentos,
         linhas_erros: linhasCapturadas
       }
     };
@@ -201,6 +258,9 @@ async function processarPDF(fileId) {
   }
 }
 
+// =========================
+// ROTAS
+// =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
@@ -244,6 +304,7 @@ app.get("/check-novos", async (req, res) => {
 
     do {
       const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
+
       const driveRes = await fetch(url);
       const drive = await driveRes.json();
 
@@ -306,7 +367,7 @@ app.get("/sync", async (req, res) => {
 
     let pageToken = null;
     let totalProcessados = 0;
-    let processadosNesteCiclo = [];
+    const processadosNesteCiclo = [];
 
     do {
       const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
@@ -383,6 +444,7 @@ app.get("/sync", async (req, res) => {
   }
 });
 
+// reprocessa registros existentes com o parser novo
 app.get("/reprocess", async (req, res) => {
   try {
     const limit = Number(req.query.limit || LIMITE_POR_LOTE);
