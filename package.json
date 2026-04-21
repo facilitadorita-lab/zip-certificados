@@ -1,14 +1,18 @@
 {
   "name": "zip-certificados",
   "version": "1.0.0",
-  "type": "module",
+  "description": "API de leitura de certificados",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "express": "^4.18.2",
     "node-fetch": "^3.3.2",
-    "pdf-parse": "^1.1.1"
+    "pdfjs-dist": "^4.5.136"
   }
 }
