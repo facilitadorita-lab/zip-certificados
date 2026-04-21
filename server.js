@@ -303,62 +303,10 @@ async function buscarArquivosDrive() {
 }
 
 // =========================
-// ROTAS
+// EXECUÇÃO DE SYNC EM BACKGROUND
 // =========================
-app.get("/", (req, res) => {
-  res.send("API OK 🚀");
-});
-
-// STATUS PARA O LOVABLE
-app.get("/status", async (req, res) => {
+async function executarSyncEmBackground() {
   try {
-    const controle = await buscarControleSync();
-    const idsBanco = await buscarIdsBanco();
-    const arquivosDrive = await buscarArquivosDrive();
-
-    const totalDrive = arquivosDrive.length;
-    const totalBanco = idsBanco.size;
-    const faltantes = arquivosDrive.filter(f => !idsBanco.has(f.id)).length;
-
-    res.json({
-      id: controle?.id || 1,
-      total_processados: controle?.total_processados || 0,
-      em_execucao: controle?.em_execucao || false,
-      ultima_execucao: controle?.ultima_execucao || null,
-      total_drive: totalDrive,
-      total_banco: totalBanco,
-      faltantes
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/certificados", async (req, res) => {
-  try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc`,
-      { headers: supabaseHeaders() }
-    );
-
-    const data = await r.json();
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/sync", async (req, res) => {
-  try {
-    const controle = await buscarControleSync();
-
-    if (controle?.em_execucao) {
-      return res.json({
-        mensagem: "Processamento já está em execução",
-        novos_processados: 0
-      });
-    }
-
     await atualizarControleSync({
       em_execucao: true,
       ultima_execucao: new Date().toISOString(),
@@ -408,14 +356,81 @@ app.get("/sync", async (req, res) => {
       ultima_execucao: new Date().toISOString(),
       total_processados: processados
     });
-
-    res.json({ novos_processados: processados });
   } catch (e) {
     await atualizarControleSync({
       em_execucao: false,
       ultima_execucao: new Date().toISOString()
     });
+  }
+}
 
+// =========================
+// ROTAS
+// =========================
+app.get("/", (req, res) => {
+  res.send("API OK 🚀");
+});
+
+// STATUS PARA O LOVABLE
+app.get("/status", async (req, res) => {
+  try {
+    const controle = await buscarControleSync();
+    const idsBanco = await buscarIdsBanco();
+    const arquivosDrive = await buscarArquivosDrive();
+
+    const totalDrive = arquivosDrive.length;
+    const totalBanco = idsBanco.size;
+    const faltantes = arquivosDrive.filter(f => !idsBanco.has(f.id)).length;
+
+    res.json({
+      id: controle?.id || 1,
+      total_processados: controle?.total_processados || 0,
+      em_execucao: controle?.em_execucao || false,
+      ultima_execucao: controle?.ultima_execucao || null,
+      total_drive: totalDrive,
+      total_banco: totalBanco,
+      faltantes
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/certificados", async (req, res) => {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// SYNC RÁPIDO PARA CRON / LOVABLE
+app.get("/sync", async (req, res) => {
+  try {
+    const controle = await buscarControleSync();
+
+    if (controle?.em_execucao) {
+      return res.json({
+        mensagem: "Processamento já está em execução",
+        novos_processados: 0
+      });
+    }
+
+    // responde imediatamente
+    res.json({
+      mensagem: "Processamento iniciado",
+      novos_processados: 0
+    });
+
+    // continua em background
+    executarSyncEmBackground();
+  } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
