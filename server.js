@@ -5,9 +5,7 @@ import pdf from "pdf-parse";
 const app = express();
 app.use(express.json());
 
-// =========================
 // CONFIG
-// =========================
 const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
 
@@ -16,9 +14,6 @@ const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 
 const LIMITE_POR_LOTE = 50;
 
-// =========================
-// HELPERS
-// =========================
 function supabaseHeaders() {
   return {
     apikey: SUPABASE_KEY,
@@ -65,37 +60,23 @@ function parseNumeroBR(valor) {
   return Math.abs(parseFloat(valor.replace(",", ".")));
 }
 
-// =========================
-// PARSER DO PDF
-// =========================
 function extrairErrosELinhas(texto) {
   const linhas = normalizarTexto(texto).split("\n");
   const erros = [];
   const linhasCapturadas = [];
 
   for (const linha of linhas) {
-    // exemplo esperado:
-    // 120 -20,1 -0,08 2,00 ∞
-    // 120 -0,1 -0,07 2,00 ∞
-    // 120 15,0 0,02 2,00 ∞
-    // 120 60,2 0,22 2,00 ∞
-
     const temK = linha.includes("2,00");
     const numeros = linha.match(/-?\d+,\d+/g);
 
     if (!temK || !numeros || numeros.length < 3) continue;
 
-    // Queremos linhas da tabela de medição, não qualquer linha do PDF.
-    // Nessas linhas, o erro costuma ser o PENÚLTIMO número antes do 2,00.
-    // Exemplo:
-    // ["-20,1", "-0,08", "2,00"] => erro = "-0,08"
     const idxK = numeros.findIndex(n => n === "2,00");
     if (idxK < 1) continue;
 
     const erroRaw = numeros[idxK - 1];
     const erro = parseNumeroBR(erroRaw);
 
-    // filtro defensivo: erro de certificado desse tipo não deveria ser enorme
     if (erro <= 2) {
       erros.push(erro);
       linhasCapturadas.push(linha);
@@ -121,8 +102,6 @@ function extrairIncertezas(texto) {
 
     if (!capturar) continue;
 
-    // queremos linhas simples com número isolado, ex:
-    // 0,20
     const m = linha.match(/^\s*(-?\d+,\d+)\s*$/);
     if (m) {
       const valor = parseNumeroBR(m[1]);
@@ -131,7 +110,6 @@ function extrairIncertezas(texto) {
         incertezas.push(valor);
       }
 
-      // padrão do seu certificado: 4 pontos
       if (incertezas.length === 4) break;
     }
   }
@@ -156,6 +134,12 @@ async function processarPDF(fileId) {
     const data = await pdf(buffer);
 
     const texto = normalizarTexto(data.text || "");
+
+    console.log("===== PDF DEBUG START =====");
+    console.log("FILE ID:", fileId);
+    console.log("TEXTO EXTRAIDO:");
+    console.log(texto.slice(0, 4000));
+    console.log("===== PDF DEBUG END =====");
 
     if (!texto) {
       return {
@@ -217,9 +201,6 @@ async function processarPDF(fileId) {
   }
 }
 
-// =========================
-// ROTAS
-// =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
@@ -263,7 +244,6 @@ app.get("/check-novos", async (req, res) => {
 
     do {
       const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
-
       const driveRes = await fetch(url);
       const drive = await driveRes.json();
 
@@ -280,7 +260,6 @@ app.get("/check-novos", async (req, res) => {
   }
 });
 
-// sync só processa novos
 app.get("/sync", async (req, res) => {
   try {
     const check = await fetch("https://zip-certificados.onrender.com/check-novos");
@@ -404,7 +383,6 @@ app.get("/sync", async (req, res) => {
   }
 });
 
-// reprocessa registros existentes com parser novo
 app.get("/reprocess", async (req, res) => {
   try {
     const limit = Number(req.query.limit || LIMITE_POR_LOTE);
