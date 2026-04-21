@@ -7,9 +7,9 @@ app.use(express.json());
 
 // 🔹 CONFIG
 const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
-const SUPABASE_KEY = "minha chave";           // ← substitua
-const GOOGLE_API_KEY = "minha chave";         // ← substitua
-const FOLDER_ID = "minha chave";              // ← substitua
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";           // ← substitua
+const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";         // ← substitua
+const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";              // ← substitua
 const LIMITE_POR_LOTE = 20;
 
 // 🔹 EXTRAIR DADOS DO NOME DO ARQUIVO
