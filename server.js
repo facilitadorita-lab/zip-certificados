@@ -1,6 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
-import pdf from "pdf-parse";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const app = express();
 app.use(express.json());
@@ -53,128 +53,166 @@ function verificarValidade(dataISO) {
   };
 }
 
-function normalizarTexto(texto) {
-  return (texto || "")
-    .replace(/\r/g, "")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, "\n")
-    .trim();
-}
-
 function parseNumeroBR(valor) {
   return parseFloat(valor.replace(",", "."));
 }
 
-function absNumeroBR(valor) {
-  return Math.abs(parseNumeroBR(valor));
+function format2(n) {
+  return Number(Number(n).toFixed(2));
+}
+
+function agruparLinhasPorY(items, tolerancia = 2.5) {
+  const ordenados = [...items].sort((a, b) => b.y - a.y);
+
+  const linhas = [];
+
+  for (const item of ordenados) {
+    let linha = linhas.find(l => Math.abs(l.y - item.y) <= tolerancia);
+
+    if (!linha) {
+      linha = { y: item.y, items: [] };
+      linhas.push(linha);
+    }
+
+    linha.items.push(item);
+  }
+
+  for (const linha of linhas) {
+    linha.items.sort((a, b) => a.x - b.x);
+    linha.texto = linha.items.map(i => i.text).join(" ");
+  }
+
+  return linhas.sort((a, b) => b.y - a.y);
+}
+
+function pegarNumeroMaisProximoDaColuna(linha, xColuna) {
+  const candidatos = linha.items.filter(i => /^-?\d+,\d+$/.test(i.text));
+  if (!candidatos.length) return null;
+
+  candidatos.sort((a, b) => Math.abs(a.x - xColuna) - Math.abs(b.x - xColuna));
+  return candidatos[0];
 }
 
 // =========================
-// PARSER DO PDF
+// LEITURA DO PDF POR POSIÇÃO
 // =========================
+async function extrairTabelaCalibracao(buffer) {
+  const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
+  const page = await pdf.getPage(1);
+  const textContent = await page.getTextContent();
 
-// 1) Extrai os ERROS da tabela principal.
-// No seu PDF, o erro é o número imediatamente antes do 2,00.
-function extrairErros(texto) {
-  const linhas = normalizarTexto(texto).split("\n");
-  const erros = [];
-  const linhasCapturadas = [];
+  const items = textContent.items
+    .map(i => ({
+      text: (i.str || "").trim(),
+      x: i.transform[4],
+      y: i.transform[5]
+    }))
+    .filter(i => i.text);
 
-  for (const linha of linhas) {
-    if (!linha.includes("2,00")) continue;
+  const linhas = agruparLinhasPorY(items);
 
-    const numeros = linha.match(/-?\d+,\d+/g);
-    if (!numeros || numeros.length < 2) continue;
+  // localizar âncoras das colunas visualmente
+  const itemAquecimento = items.find(i => /Aquecimento/i.test(i.text));
+  const itemErro = items.find(i => /^Erro$/i.test(i.text));
+  const itemExpandida = items.find(i => /Expandida/i.test(i.text));
 
-    const idxK = numeros.findIndex(n => n === "2,00");
-    if (idxK < 1) continue;
-
-    const erroRaw = numeros[idxK - 1];
-    const erro = Math.abs(parseNumeroBR(erroRaw));
-
-    // filtro defensivo
-    if (erro <= 2) {
-      erros.push(Number(erro.toFixed(2)));
-      linhasCapturadas.push(linha);
-    }
-
-    if (erros.length === 4) break;
-  }
-
-  return { erros, linhasCapturadas };
-}
-
-// 2) Extrai as 4 INCERTEZAS da seção "Incerteza da Medição Expandida".
-function extrairIncertezas(texto) {
-  const linhas = normalizarTexto(texto).split("\n");
-  const incertezas = [];
-  let capturar = false;
-
-  for (const linha of linhas) {
-    const l = linha.toLowerCase().trim();
-
-    if (l.includes("incerteza da")) {
-      capturar = true;
-      continue;
-    }
-
-    if (!capturar) continue;
-
-    if (l.includes("medição expandida")) continue;
-
-    const m = linha.match(/^\s*(-?\d+,\d+)\s*$/);
-    if (m) {
-      const valor = Math.abs(parseNumeroBR(m[1]));
-
-      if (valor <= 2) {
-        incertezas.push(Number(valor.toFixed(2)));
+  if (!itemAquecimento || !itemErro || !itemExpandida) {
+    return {
+      ok: false,
+      motivo: "Não encontrou cabeçalhos da tabela",
+      debug: {
+        cabecalhos: {
+          aquecimento: !!itemAquecimento,
+          erro: !!itemErro,
+          expandida: !!itemExpandida
+        }
       }
+    };
+  }
 
-      if (incertezas.length === 4) break;
+  const xAquecimento = itemAquecimento.x;
+  const xErro = itemErro.x;
+  const xIncerteza = itemExpandida.x;
+
+  // pega apenas linhas abaixo do cabeçalho principal
+  const linhasDados = linhas.filter(l => l.y < itemErro.y - 5);
+
+  const candidatos = [];
+
+  for (const linha of linhasDados) {
+    const aqItem = pegarNumeroMaisProximoDaColuna(linha, xAquecimento);
+    const erroItem = pegarNumeroMaisProximoDaColuna(linha, xErro);
+    const incItem = pegarNumeroMaisProximoDaColuna(linha, xIncerteza);
+
+    if (!aqItem || !erroItem || !incItem) continue;
+
+    const aquecimento = parseNumeroBR(aqItem.text);
+    const erro = Math.abs(parseNumeroBR(erroItem.text));
+    const incerteza = Math.abs(parseNumeroBR(incItem.text));
+
+    // filtros defensivos para pegar só a tabela certa
+    if (aquecimento < -100 || aquecimento > 200) continue;
+    if (erro > 2 || incerteza > 2) continue;
+
+    candidatos.push({
+      y: linha.y,
+      aquecimento: format2(aquecimento),
+      erro: format2(erro),
+      incerteza: format2(incerteza),
+      texto: linha.texto
+    });
+  }
+
+  // remove duplicadas por aquecimento
+  const unicos = [];
+  const vistos = new Set();
+
+  for (const c of candidatos.sort((a, b) => b.y - a.y)) {
+    const chave = c.aquecimento.toFixed(2);
+    if (!vistos.has(chave)) {
+      vistos.add(chave);
+      unicos.push(c);
     }
   }
 
-  return incertezas;
-}
+  // queremos só os 4 pontos
+  const pontosOrdenados = unicos
+    .sort((a, b) => a.aquecimento - b.aquecimento)
+    .slice(0, 4);
 
-// 3) Extrai os 4 pontos de AQUECIMENTO.
-// No seu PDF eles aparecem na seção:
-// Aquecimento
-// -20,00
-// 0,00
-// 15,00
-// 60,00
-function extrairAquecimentos(texto) {
-  const linhas = normalizarTexto(texto).split("\n");
-  const aquecimentos = [];
-  let capturar = false;
-
-  for (const linha of linhas) {
-    const l = linha.toLowerCase().trim();
-
-    if (l === "aquecimento") {
-      capturar = true;
-      continue;
-    }
-
-    if (!capturar) continue;
-
-    const m = linha.match(/^\s*(-?\d+,\d+)\s*$/);
-    if (m) {
-      const valor = parseNumeroBR(m[1]);
-
-      // faixa esperada de temperatura do seu certificado
-      if (valor >= -100 && valor <= 200) {
-        aquecimentos.push(Number(valor.toFixed(2)));
+  if (pontosOrdenados.length < 4) {
+    return {
+      ok: false,
+      motivo: "Não encontrou 4 linhas válidas da tabela",
+      debug: {
+        xAquecimento,
+        xErro,
+        xIncerteza,
+        candidatos: candidatos.map(c => ({
+          aquecimento: c.aquecimento,
+          erro: c.erro,
+          incerteza: c.incerteza,
+          texto: c.texto
+        }))
       }
-
-      if (aquecimentos.length === 4) break;
-    }
+    };
   }
 
-  return aquecimentos;
+  return {
+    ok: true,
+    linhas: pontosOrdenados.map((p, idx) => ({
+      ponto: idx + 1,
+      aquecimento: p.aquecimento,
+      erro: p.erro,
+      incerteza: p.incerteza,
+      soma: format2(p.erro + p.incerteza)
+    }))
+  };
 }
 
+// =========================
+// PROCESSAMENTO PRINCIPAL
+// =========================
 async function processarPDF(fileId) {
   try {
     const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
@@ -189,65 +227,26 @@ async function processarPDF(fileId) {
     }
 
     const buffer = Buffer.from(await res.arrayBuffer());
-    const data = await pdf(buffer);
 
-    const texto = normalizarTexto(data.text || "");
+    const tabela = await extrairTabelaCalibracao(buffer);
 
-    if (!texto) {
+    if (!tabela.ok) {
       return {
         status: "ERRO",
         pontos: [],
-        debug: { motivo: "PDF sem texto legível" }
-      };
-    }
-
-    const { erros, linhasCapturadas } = extrairErros(texto);
-    const incertezas = extrairIncertezas(texto);
-    const aquecimentos = extrairAquecimentos(texto);
-
-    if (erros.length < 4 || incertezas.length < 4 || aquecimentos.length < 4) {
-      return {
-        status: "ERRO",
-        pontos: [],
-        debug: {
-          motivo: "Não encontrou 4 erros, 4 incertezas e 4 pontos de aquecimento",
-          erros_encontrados: erros,
-          incertezas_encontradas: incertezas,
-          aquecimentos_encontrados: aquecimentos,
-          linhas_erros: linhasCapturadas
-        }
+        debug: tabela.debug || { motivo: tabela.motivo || "Falha ao ler tabela" }
       };
     }
 
     let aprovado = true;
-    const pontos = [];
-
-    for (let i = 0; i < 4; i++) {
-      const aquecimento = aquecimentos[i];
-      const erro = Math.abs(erros[i]);
-      const incerteza = Math.abs(incertezas[i]);
-      const soma = Number((erro + incerteza).toFixed(2));
-
-      if (soma > 0.5) aprovado = false;
-
-      pontos.push({
-        ponto: i + 1,
-        aquecimento: Number(aquecimento.toFixed(2)),
-        erro: Number(erro.toFixed(2)),
-        incerteza: Number(incerteza.toFixed(2)),
-        soma
-      });
-    }
+    const pontos = tabela.linhas.map(p => {
+      if (p.soma > 0.5) aprovado = false;
+      return p;
+    });
 
     return {
       status: aprovado ? "APROVADO" : "REPROVADO",
-      pontos,
-      debug: {
-        erros_encontrados: erros,
-        incertezas_encontradas: incertezas,
-        aquecimentos_encontrados: aquecimentos,
-        linhas_erros: linhasCapturadas
-      }
+      pontos
     };
   } catch (e) {
     return {
@@ -444,10 +443,10 @@ app.get("/sync", async (req, res) => {
   }
 });
 
-// reprocessa registros existentes com o parser novo
 app.get("/reprocess", async (req, res) => {
   try {
     const limit = Number(req.query.limit || LIMITE_POR_LOTE);
+    const offset = Number(req.query.offset || 0);
 
     await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
       method: "PATCH",
@@ -459,7 +458,7 @@ app.get("/reprocess", async (req, res) => {
     });
 
     const existentesRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=id,nome_original,dlt,serie,data&limit=${limit}`,
+      `${SUPABASE_URL}/rest/v1/certificados?select=id,nome_original,dlt,serie,data&order=criado_em.asc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           apikey: SUPABASE_KEY,
@@ -507,7 +506,9 @@ app.get("/reprocess", async (req, res) => {
 
     res.json({
       mensagem: "Reprocessamento concluído",
-      processados: totalProcessados
+      processados: totalProcessados,
+      offset,
+      proximo_offset: offset + totalProcessados
     });
   } catch (e) {
     await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
