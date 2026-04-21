@@ -142,7 +142,6 @@ async function extrairTabelaPorColunas(buffer) {
   const yTopoTabela = Math.max(cabAquecimento.y, cabErro.y, cabIncerteza.y);
 
   const linhasDados = linhas.filter(l => l.y < yTopoTabela - 3);
-
   const candidatos = [];
 
   for (const linha of linhasDados) {
@@ -256,7 +255,7 @@ async function processarPDF(fileId) {
 }
 
 // =========================
-// CONTROLE DE STATUS
+// CONTROLE / DRIVE
 // =========================
 async function atualizarControleSync(payload) {
   await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
@@ -264,6 +263,43 @@ async function atualizarControleSync(payload) {
     headers: supabaseHeaders(),
     body: JSON.stringify(payload)
   });
+}
+
+async function buscarControleSync() {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1&select=*`,
+    { headers: supabaseHeaders() }
+  );
+
+  const data = await r.json();
+  return data && data.length ? data[0] : null;
+}
+
+async function buscarIdsBanco() {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/certificados?select=id`,
+    { headers: supabaseHeaders() }
+  );
+
+  const data = await r.json();
+  return new Set((data || []).map(e => e.id));
+}
+
+async function buscarArquivosDrive() {
+  const arquivos = [];
+  let pageToken = null;
+
+  do {
+    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    arquivos.push(...(data.files || []));
+    pageToken = data.nextPageToken || null;
+  } while (pageToken);
+
+  return arquivos;
 }
 
 // =========================
@@ -276,22 +312,23 @@ app.get("/", (req, res) => {
 // STATUS PARA O LOVABLE
 app.get("/status", async (req, res) => {
   try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1&select=*`,
-      { headers: supabaseHeaders() }
-    );
+    const controle = await buscarControleSync();
+    const idsBanco = await buscarIdsBanco();
+    const arquivosDrive = await buscarArquivosDrive();
 
-    const data = await r.json();
+    const totalDrive = arquivosDrive.length;
+    const totalBanco = idsBanco.size;
+    const faltantes = arquivosDrive.filter(f => !idsBanco.has(f.id)).length;
 
-    if (!data || data.length === 0) {
-      return res.json({
-        total_processados: 0,
-        em_execucao: false,
-        ultima_execucao: null
-      });
-    }
-
-    res.json(data[0]);
+    res.json({
+      id: controle?.id || 1,
+      total_processados: controle?.total_processados || 0,
+      em_execucao: controle?.em_execucao || false,
+      ultima_execucao: controle?.ultima_execucao || null,
+      total_drive: totalDrive,
+      total_banco: totalBanco,
+      faltantes
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -313,28 +350,28 @@ app.get("/certificados", async (req, res) => {
 
 app.get("/sync", async (req, res) => {
   try {
+    const controle = await buscarControleSync();
+
+    if (controle?.em_execucao) {
+      return res.json({
+        mensagem: "Processamento já está em execução",
+        novos_processados: 0
+      });
+    }
+
     await atualizarControleSync({
       em_execucao: true,
       ultima_execucao: new Date().toISOString(),
       total_processados: 0
     });
 
-    const existentesRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=id`,
-      { headers: supabaseHeaders() }
-    );
-
-    const existentes = await existentesRes.json();
-    const ids = new Set((existentes || []).map(e => e.id));
-
-    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents&key=${GOOGLE_API_KEY}&fields=files(id,name)&pageSize=1000`;
-    const driveRes = await fetch(url);
-    const drive = await driveRes.json();
+    const idsBanco = await buscarIdsBanco();
+    const arquivosDrive = await buscarArquivosDrive();
 
     let processados = 0;
 
-    for (const f of drive.files || []) {
-      if (ids.has(f.id)) continue;
+    for (const f of arquivosDrive) {
+      if (idsBanco.has(f.id)) continue;
       if (processados >= LIMITE) break;
 
       const base = extrairDados(f.name);
@@ -387,6 +424,17 @@ app.get("/reprocess", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 50);
     const offset = Number(req.query.offset || 0);
+
+    const controle = await buscarControleSync();
+
+    if (controle?.em_execucao) {
+      return res.json({
+        mensagem: "Processamento já está em execução",
+        processados: 0,
+        offset,
+        proximo_offset: offset
+      });
+    }
 
     await atualizarControleSync({
       em_execucao: true,
