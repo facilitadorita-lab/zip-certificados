@@ -120,7 +120,6 @@ async function extrairTabelaPorColunas(buffer) {
 
   const linhas = agruparLinhasPorY(items);
 
-  // Cabeçalhos da tabela
   const cabAquecimento = acharCabecalho(items, /^Aquecimento$/i);
   const cabErro = acharCabecalho(items, /^Erro$/i);
   const cabIncerteza = acharCabecalho(items, /Medição Expandida/i);
@@ -142,7 +141,6 @@ async function extrairTabelaPorColunas(buffer) {
   const xIncerteza = cabIncerteza.x;
   const yTopoTabela = Math.max(cabAquecimento.y, cabErro.y, cabIncerteza.y);
 
-  // Só linhas abaixo do cabeçalho
   const linhasDados = linhas.filter(l => l.y < yTopoTabela - 3);
 
   const candidatos = [];
@@ -171,7 +169,6 @@ async function extrairTabelaPorColunas(buffer) {
     });
   }
 
-  // Remove duplicidade por aquecimento
   const vistos = new Set();
   const unicos = [];
 
@@ -183,7 +180,6 @@ async function extrairTabelaPorColunas(buffer) {
     }
   }
 
-  // Ordena e pega exatamente 4 pontos
   const pontosOrdenados = unicos
     .sort((a, b) => a.aquecimento - b.aquecimento)
     .slice(0, 4);
@@ -260,10 +256,45 @@ async function processarPDF(fileId) {
 }
 
 // =========================
+// CONTROLE DE STATUS
+// =========================
+async function atualizarControleSync(payload) {
+  await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
+    method: "PATCH",
+    headers: supabaseHeaders(),
+    body: JSON.stringify(payload)
+  });
+}
+
+// =========================
 // ROTAS
 // =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
+});
+
+// STATUS PARA O LOVABLE
+app.get("/status", async (req, res) => {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1&select=*`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    if (!data || data.length === 0) {
+      return res.json({
+        total_processados: 0,
+        em_execucao: false,
+        ultima_execucao: null
+      });
+    }
+
+    res.json(data[0]);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.get("/certificados", async (req, res) => {
@@ -282,6 +313,12 @@ app.get("/certificados", async (req, res) => {
 
 app.get("/sync", async (req, res) => {
   try {
+    await atualizarControleSync({
+      em_execucao: true,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: 0
+    });
+
     const existentesRes = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?select=id`,
       { headers: supabaseHeaders() }
@@ -321,10 +358,27 @@ app.get("/sync", async (req, res) => {
       });
 
       processados++;
+
+      await atualizarControleSync({
+        em_execucao: true,
+        ultima_execucao: new Date().toISOString(),
+        total_processados: processados
+      });
     }
+
+    await atualizarControleSync({
+      em_execucao: false,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: processados
+    });
 
     res.json({ novos_processados: processados });
   } catch (e) {
+    await atualizarControleSync({
+      em_execucao: false,
+      ultima_execucao: new Date().toISOString()
+    });
+
     res.status(500).json({ erro: e.message });
   }
 });
@@ -333,6 +387,12 @@ app.get("/reprocess", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 50);
     const offset = Number(req.query.offset || 0);
+
+    await atualizarControleSync({
+      em_execucao: true,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: 0
+    });
 
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?select=id,data&limit=${limit}&offset=${offset}`,
@@ -355,7 +415,19 @@ app.get("/reprocess", async (req, res) => {
       });
 
       total++;
+
+      await atualizarControleSync({
+        em_execucao: true,
+        ultima_execucao: new Date().toISOString(),
+        total_processados: total
+      });
     }
+
+    await atualizarControleSync({
+      em_execucao: false,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: total
+    });
 
     res.json({
       mensagem: "Reprocessamento concluído",
@@ -364,6 +436,11 @@ app.get("/reprocess", async (req, res) => {
       proximo_offset: offset + total
     });
   } catch (e) {
+    await atualizarControleSync({
+      em_execucao: false,
+      ultima_execucao: new Date().toISOString()
+    });
+
     res.status(500).json({ erro: e.message });
   }
 });
