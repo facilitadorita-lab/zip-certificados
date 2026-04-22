@@ -107,7 +107,40 @@ function numeroMaisProximoNaColuna(linha, xColuna, faixa = 30) {
   candidatos.sort((a, b) => Math.abs(a.x - xColuna) - Math.abs(b.x - xColuna));
   return candidatos[0];
 }
+function avaliarDivergencia(dlt, serie) {
+  const tag = normalizarDLT(dlt);
+  const serieEsperada = tag ? MAPA_LOGGERS[tag] || null : null;
 
+  if (!tag) {
+    return {
+      divergente: true,
+      serie_esperada: null,
+      motivo_divergencia: "DLT inválido"
+    };
+  }
+
+  if (!serieEsperada) {
+    return {
+      divergente: true,
+      serie_esperada: null,
+      motivo_divergencia: "DLT não encontrado na base"
+    };
+  }
+
+  if (String(serie).trim() !== String(serieEsperada).trim()) {
+    return {
+      divergente: true,
+      serie_esperada: serieEsperada,
+      motivo_divergencia: "Série divergente"
+    };
+  }
+
+  return {
+    divergente: false,
+    serie_esperada: serieEsperada,
+    motivo_divergencia: null
+  };
+}
 // =========================
 // LEITURA DA TABELA DO PDF
 // =========================
