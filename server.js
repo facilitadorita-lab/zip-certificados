@@ -48,12 +48,11 @@ function extrairDados(nome) {
   };
 }
 
+// validade por mês/ano + 1 ano
 function verificarValidade(dataISO) {
-  if (!dataISO) return { valido: false, vencimento: null };
+  if (!dataISO) return { valido: false, vencimento: null, mes_ano: null };
 
   const [ano, mes] = dataISO.split("-").map(Number);
-
-  // último dia do mês + 1 ano
   const vencimentoDate = new Date(ano + 1, mes, 0);
 
   const hoje = new Date();
@@ -107,6 +106,7 @@ function numeroMaisProximoNaColuna(linha, xColuna, faixa = 30) {
   candidatos.sort((a, b) => Math.abs(a.x - xColuna) - Math.abs(b.x - xColuna));
   return candidatos[0];
 }
+
 function avaliarDivergencia(dlt, serie) {
   const tag = normalizarDLT(dlt);
   const serieEsperada = tag ? MAPA_LOGGERS[tag] || null : null;
@@ -141,6 +141,7 @@ function avaliarDivergencia(dlt, serie) {
     motivo_divergencia: null
   };
 }
+
 // =========================
 // LEITURA DA TABELA DO PDF
 // =========================
@@ -378,7 +379,11 @@ async function executarSyncEmBackground() {
           status: proc.status,
           validade: val.valido,
           vencimento: val.vencimento,
-          pontos: proc.pontos
+          mes_ano_validade: val.mes_ano,
+          pontos: proc.pontos,
+          divergente: divergencia.divergente,
+          serie_esperada: divergencia.serie_esperada,
+          motivo_divergencia: divergencia.motivo_divergencia
         })
       });
 
@@ -411,7 +416,6 @@ app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
 
-// STATUS PARA O LOVABLE
 app.get("/status", async (req, res) => {
   try {
     const controle = await buscarControleSync();
@@ -450,7 +454,20 @@ app.get("/certificados", async (req, res) => {
   }
 });
 
-// SYNC RÁPIDO PARA CRON / LOVABLE
+app.get("/divergentes", async (req, res) => {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&divergente=eq.true&order=data.desc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/sync", async (req, res) => {
   try {
     const controle = await buscarControleSync();
@@ -462,13 +479,11 @@ app.get("/sync", async (req, res) => {
       });
     }
 
-    // responde imediatamente
     res.json({
       mensagem: "Processamento iniciado",
       novos_processados: 0
     });
 
-    // continua em background
     executarSyncEmBackground();
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -498,7 +513,7 @@ app.get("/reprocess", async (req, res) => {
     });
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=id,data&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados?select=id,data,dlt,serie&limit=${limit}&offset=${offset}`,
       { headers: supabaseHeaders() }
     );
 
@@ -507,13 +522,21 @@ app.get("/reprocess", async (req, res) => {
 
     for (const item of lista) {
       const proc = await processarPDF(item.id);
+      const val = verificarValidade(item.data);
+      const divergencia = avaliarDivergencia(item.dlt, item.serie);
 
       await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${item.id}`, {
         method: "PATCH",
         headers: supabaseHeaders(),
         body: JSON.stringify({
           status: proc.status,
-          pontos: proc.pontos
+          pontos: proc.pontos,
+          validade: val.valido,
+          vencimento: val.vencimento,
+          mes_ano_validade: val.mes_ano,
+          divergente: divergencia.divergente,
+          serie_esperada: divergencia.serie_esperada,
+          motivo_divergencia: divergencia.motivo_divergencia
         })
       });
 
