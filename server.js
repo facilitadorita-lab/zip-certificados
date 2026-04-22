@@ -1,4 +1,5 @@
 import express from "express";
+import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
 import fetch from "node-fetch";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
