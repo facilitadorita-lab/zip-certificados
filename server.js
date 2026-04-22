@@ -50,13 +50,18 @@ function extrairDados(nome) {
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null };
 
-  const d = new Date(dataISO);
-  const v = new Date(d);
-  v.setFullYear(v.getFullYear() + 1);
+  const [ano, mes] = dataISO.split("-").map(Number);
+
+  // último dia do mês + 1 ano
+  const vencimentoDate = new Date(ano + 1, mes, 0);
+
+  const hoje = new Date();
+  hoje.setHours(0, 0, 0, 0);
 
   return {
-    valido: new Date() <= v,
-    vencimento: v.toISOString().split("T")[0]
+    valido: hoje <= vencimentoDate,
+    vencimento: vencimentoDate.toISOString().split("T")[0],
+    mes_ano: `${String(mes).padStart(2, "0")}/${ano + 1}`
   };
 }
 
