@@ -612,5 +612,26 @@ app.get("/teste/:id", async (req, res) => {
   const resultado = await processarPDF(req.params.id);
   res.json(resultado);
 });
+app.get("/pendentes", async (req, res) => {
+  try {
+    const idsBanco = await buscarIdsBanco();
+    const arquivosDrive = await buscarArquivosDrive();
+
+    const pendentes = arquivosDrive
+      .filter(f => !idsBanco.has(f.id))
+      .map(f => ({
+        id: f.id,
+        nome_original: f.name
+      }))
+      .sort((a, b) => a.nome_original.localeCompare(b.nome_original, "pt-BR"));
+
+    res.json({
+      total: pendentes.length,
+      arquivos: pendentes
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
 
 app.listen(3000, () => console.log("Servidor rodando 🚀"));
