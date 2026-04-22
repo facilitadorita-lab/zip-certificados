@@ -315,14 +315,51 @@ async function buscarControleSync() {
   return data && data.length ? data[0] : null;
 }
 
+// CORRIGIDO: busca todos os IDs, mesmo acima de 1000
 async function buscarIdsBanco() {
+  const ids = new Set();
+  const limit = 1000;
+  let offset = 0;
+
+  while (true) {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=id&limit=${limit}&offset=${offset}`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    if (!data || data.length === 0) break;
+
+    for (const item of data) {
+      ids.add(item.id);
+    }
+
+    if (data.length < limit) break;
+    offset += limit;
+  }
+
+  return ids;
+}
+
+// NOVA: conta o total real da tabela no Supabase
+async function contarCertificadosBanco() {
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/certificados?select=id`,
-    { headers: supabaseHeaders() }
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "count=exact",
+        Range: "0-0"
+      }
+    }
   );
 
-  const data = await r.json();
-  return new Set((data || []).map(e => e.id));
+  const contentRange = r.headers.get("content-range");
+  if (!contentRange) return 0;
+
+  const total = contentRange.split("/")[1];
+  return Number(total || 0);
 }
 
 async function buscarArquivosDrive() {
@@ -419,11 +456,11 @@ app.get("/", (req, res) => {
 app.get("/status", async (req, res) => {
   try {
     const controle = await buscarControleSync();
+    const totalBanco = await contarCertificadosBanco();
     const idsBanco = await buscarIdsBanco();
     const arquivosDrive = await buscarArquivosDrive();
 
     const totalDrive = arquivosDrive.length;
-    const totalBanco = idsBanco.size;
     const faltantes = arquivosDrive.filter(f => !idsBanco.has(f.id)).length;
 
     res.json({
