@@ -364,6 +364,7 @@ async function executarSyncEmBackground() {
       const base = extrairDados(f.name);
       const proc = await processarPDF(f.id);
       const val = verificarValidade(base.data);
+      const divergencia = avaliarDivergencia(base.dlt, base.serie);
 
       await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
         method: "POST",
