@@ -214,14 +214,12 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
   let serie = "";
   let data = "";
 
-  // Ex.: "37186878 DLT-0943"
   let m = texto.match(/(\d{8})\s+DLT-(\d{4})/i);
   if (m) {
     serie = m[1];
     dlt = m[2];
   }
 
-  // fallback invertido
   if (!dlt || !serie) {
     m = texto.match(/DLT-(\d{4})\s+(\d{8})/i);
     if (m) {
@@ -230,7 +228,6 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
     }
   }
 
-  // tenta pegar a data após "Data da Calibração"
   let dataMatch = null;
   const idx = texto.search(/Data da Calibração/i);
   if (idx >= 0) {
@@ -238,7 +235,6 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
     dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
   }
 
-  // fallback: primeira data do texto
   if (!dataMatch) {
     dataMatch = texto.match(/(\d{2}\/\d{2}\/\d{4})/);
   }
@@ -247,7 +243,6 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
     data = formatarDataBRparaISO(dataMatch[1]);
   }
 
-  // fallback pelo nome, se algo faltar
   const baseNome = extrairDados(nomeOriginal);
   if (!dlt && baseNome.dlt) dlt = soDigitos(baseNome.dlt).padStart(4, "0");
   if (!serie && baseNome.serie) serie = soDigitos(baseNome.serie);
@@ -611,13 +606,29 @@ app.get("/status", async (req, res) => {
 
 app.get("/certificados", async (req, res) => {
   try {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc`,
-      { headers: supabaseHeaders() }
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc&limit=${limit}&offset=${offset}`,
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "count=exact"
+        }
+      }
     );
 
     const data = await r.json();
-    res.json(data);
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: data
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -625,13 +636,29 @@ app.get("/certificados", async (req, res) => {
 
 app.get("/divergentes", async (req, res) => {
   try {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&divergente=eq.true&order=data.desc`,
-      { headers: supabaseHeaders() }
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "count=exact"
+        }
+      }
     );
 
     const data = await r.json();
-    res.json(data);
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: data
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
