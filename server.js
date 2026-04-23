@@ -967,4 +967,91 @@ app.delete("/certificados/:id", async (req, res) => {
   }
 });
 
+app.get("/relatorio-dia", async (req, res) => {
+  try {
+    const hoje = new Date();
+    const inicio = new Date(hoje.setHours(0, 0, 0, 0)).toISOString();
+    const fim = new Date(hoje.setHours(23, 59, 59, 999)).toISOString();
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&criado_em=gte.${inicio}&criado_em=lte.${fim}&order=data.asc`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    const dados = await r.json();
+
+    // monta HTML estilo relatório técnico
+    const linhas = dados.map((c, i) => {
+      const pontos = c.pontos || [];
+
+      const p1 = pontos[0] || {};
+      const p2 = pontos[1] || {};
+      const p3 = pontos[2] || {};
+      const p4 = pontos[3] || {};
+
+      return `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${c.dlt}</td>
+        <td>${c.serie}</td>
+        <td>${c.data}</td>
+        <td>${p1.erro || "-"}</td>
+        <td>${p1.incerteza || "-"}</td>
+        <td>${p1.soma || "-"}</td>
+        <td>${p2.soma || "-"}</td>
+        <td>${p3.soma || "-"}</td>
+        <td>${p4.soma || "-"}</td>
+        <td>${c.status}</td>
+      </tr>
+      `;
+    }).join("");
+
+    const html = `
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial; font-size: 10px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid black; padding: 4px; text-align: center; }
+        th { background: #eee; }
+        h2 { text-align: center; }
+      </style>
+    </head>
+    <body>
+      <h2>RELATÓRIO DE PROCESSAMENTO - ${new Date().toLocaleDateString()}</h2>
+
+      <table>
+        <tr>
+          <th>#</th>
+          <th>DLT</th>
+          <th>Série</th>
+          <th>Data</th>
+          <th>Erro P1</th>
+          <th>Inc P1</th>
+          <th>Soma P1</th>
+          <th>Soma P2</th>
+          <th>Soma P3</th>
+          <th>Soma P4</th>
+          <th>Status</th>
+        </tr>
+
+        ${linhas}
+      </table>
+
+      <br/>
+      <b>Total de registros: ${dados.length}</b>
+    </body>
+    </html>
+    `;
+
+    res.setHeader("Content-Type", "text/html");
+    res.send(html);
+
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.listen(3000, () => console.log("Servidor rodando 🚀"));
