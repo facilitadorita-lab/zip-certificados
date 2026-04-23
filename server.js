@@ -48,6 +48,31 @@ function extrairDados(nome) {
   };
 }
 
+function soDigitos(texto) {
+  return String(texto || "").replace(/\D/g, "");
+}
+
+function formatarDataBRparaISO(dataBR) {
+  const m = String(dataBR || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return "";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function formatarDataISOParaNome(dataISO) {
+  if (!dataISO) return "";
+  const [ano, mes, dia] = dataISO.split("-");
+  if (!ano || !mes || !dia) return "";
+  return `${dia}.${mes}.${ano}`;
+}
+
+function montarNomePadrao(dlt, serie, dataISO) {
+  const tag = normalizarDLT(dlt);
+  const dataFormatada = formatarDataISOParaNome(dataISO);
+
+  if (!tag || !serie || !dataFormatada) return null;
+  return `${tag}_${serie}_${dataFormatada}.pdf`;
+}
+
 // validade por mês/ano + 1 ano
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null, mes_ano: null };
@@ -142,10 +167,30 @@ function avaliarDivergencia(dlt, serie) {
   };
 }
 
+function execucaoTravada(controle) {
+  if (!controle?.em_execucao || !controle?.ultima_execucao) return false;
+
+  const ultima = new Date(controle.ultima_execucao).getTime();
+  const agora = Date.now();
+
+  return agora - ultima > 5 * 60 * 1000;
+}
+
 // =========================
-// LEITURA DA TABELA DO PDF
+// PDF / TEXTO
 // =========================
-async function extrairTabelaPorColunas(buffer) {
+async function baixarArquivoDrive(fileId) {
+  const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Falha ao baixar arquivo do Drive: ${res.status}`);
+  }
+
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function extrairTextoELinhasDoPDF(buffer) {
   const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
   const page = await pdf.getPage(1);
   const textContent = await page.getTextContent();
@@ -159,6 +204,67 @@ async function extrairTabelaPorColunas(buffer) {
     .filter(i => i.text);
 
   const linhas = agruparLinhasPorY(items);
+  const texto = linhas.map(l => l.texto).join("\n");
+
+  return { texto, items, linhas };
+}
+
+function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
+  let dlt = "";
+  let serie = "";
+  let data = "";
+
+  // Ex.: "37186878 DLT-0943"
+  let m = texto.match(/(\d{8})\s+DLT-(\d{4})/i);
+  if (m) {
+    serie = m[1];
+    dlt = m[2];
+  }
+
+  // fallback invertido
+  if (!dlt || !serie) {
+    m = texto.match(/DLT-(\d{4})\s+(\d{8})/i);
+    if (m) {
+      dlt = m[1];
+      serie = m[2];
+    }
+  }
+
+  // tenta pegar a data após "Data da Calibração"
+  let dataMatch = null;
+  const idx = texto.search(/Data da Calibração/i);
+  if (idx >= 0) {
+    const trecho = texto.slice(idx, idx + 400);
+    dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
+  }
+
+  // fallback: primeira data do texto
+  if (!dataMatch) {
+    dataMatch = texto.match(/(\d{2}\/\d{2}\/\d{4})/);
+  }
+
+  if (dataMatch) {
+    data = formatarDataBRparaISO(dataMatch[1]);
+  }
+
+  // fallback pelo nome, se algo faltar
+  const baseNome = extrairDados(nomeOriginal);
+  if (!dlt && baseNome.dlt) dlt = soDigitos(baseNome.dlt).padStart(4, "0");
+  if (!serie && baseNome.serie) serie = soDigitos(baseNome.serie);
+  if (!data && baseNome.data) data = baseNome.data;
+
+  return {
+    dlt: dlt ? soDigitos(dlt).padStart(4, "0") : "",
+    serie: serie ? soDigitos(serie) : "",
+    data: data || ""
+  };
+}
+
+// =========================
+// LEITURA DA TABELA DO PDF
+// =========================
+async function extrairTabelaPorColunas(buffer) {
+  const { items, linhas } = await extrairTextoELinhasDoPDF(buffer);
 
   const cabAquecimento = acharCabecalho(items, /^Aquecimento$/i);
   const cabErro = acharCabecalho(items, /^Erro$/i);
@@ -257,14 +363,7 @@ async function extrairTabelaPorColunas(buffer) {
 // =========================
 async function processarPDF(fileId) {
   try {
-    const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-    const res = await fetch(url);
-
-    if (!res.ok) {
-      return { status: "ERRO", pontos: [] };
-    }
-
-    const buffer = Buffer.from(await res.arrayBuffer());
+    const buffer = await baixarArquivoDrive(fileId);
     const tabela = await extrairTabelaPorColunas(buffer);
 
     if (!tabela.ok) {
@@ -275,11 +374,7 @@ async function processarPDF(fileId) {
       };
     }
 
-    let aprovado = true;
-
-    for (const p of tabela.pontos) {
-      if (p.soma > 0.5) aprovado = false;
-    }
+    const aprovado = tabela.pontos.every(p => p.soma <= 0.5);
 
     return {
       status: aprovado ? "APROVADO" : "REPROVADO",
@@ -315,7 +410,6 @@ async function buscarControleSync() {
   return data && data.length ? data[0] : null;
 }
 
-// CORRIGIDO: busca todos os IDs, mesmo acima de 1000
 async function buscarIdsBanco() {
   const ids = new Set();
   const limit = 1000;
@@ -342,7 +436,6 @@ async function buscarIdsBanco() {
   return ids;
 }
 
-// NOVA: conta o total real da tabela no Supabase
 async function contarCertificadosBanco() {
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/certificados?select=id`,
@@ -399,46 +492,85 @@ async function executarSyncEmBackground() {
       if (idsBanco.has(f.id)) continue;
       if (processados >= LIMITE) break;
 
-      const base = extrairDados(f.name);
-      const proc = await processarPDF(f.id);
-      const val = verificarValidade(base.data);
-      const divergencia = avaliarDivergencia(base.dlt, base.serie);
+      try {
+        const buffer = await baixarArquivoDrive(f.id);
+        const { texto } = await extrairTextoELinhasDoPDF(buffer);
+        const meta = extrairMetadadosDoTexto(texto, f.name);
 
-      await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-        method: "POST",
-        headers: supabaseHeaders(),
-        body: JSON.stringify({
-          id: f.id,
-          nome_original: base.nome_original,
-          dlt: base.dlt,
-          serie: base.serie,
-          data: base.data,
-          status: proc.status,
-          validade: val.valido,
-          vencimento: val.vencimento,
-          mes_ano_validade: val.mes_ano,
-          pontos: proc.pontos,
-          divergente: divergencia.divergente,
-          serie_esperada: divergencia.serie_esperada,
-          motivo_divergencia: divergencia.motivo_divergencia
-        })
-      });
+        if (!meta.dlt || !meta.serie || !meta.data) {
+          console.log("Arquivo sem metadados suficientes:", f.name, meta);
+          continue;
+        }
 
-      processados++;
+        const tabela = await extrairTabelaPorColunas(buffer);
 
-      await atualizarControleSync({
-        em_execucao: true,
-        ultima_execucao: new Date().toISOString(),
-        total_processados: processados
-      });
+        if (!tabela.ok) {
+          console.log("Arquivo sem tabela válida:", f.name, tabela.debug);
+          continue;
+        }
+
+        const status = tabela.pontos.every(p => p.soma <= 0.5) ? "APROVADO" : "REPROVADO";
+        const val = verificarValidade(meta.data);
+        const divergencia = avaliarDivergencia(meta.dlt, meta.serie);
+        const nomePadronizado = montarNomePadrao(meta.dlt, meta.serie, meta.data);
+
+        const respInsert = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
+          method: "POST",
+          headers: supabaseHeaders(),
+          body: JSON.stringify({
+            id: f.id,
+            nome_original: f.name,
+            nome_download: nomePadronizado,
+            dlt: meta.dlt,
+            serie: meta.serie,
+            data: meta.data,
+            status: status,
+            validade: val.valido,
+            vencimento: val.vencimento,
+            mes_ano_validade: val.mes_ano,
+            pontos: tabela.pontos,
+            divergente: divergencia.divergente,
+            serie_esperada: divergencia.serie_esperada,
+            motivo_divergencia: divergencia.motivo_divergencia
+          })
+        });
+
+        if (!respInsert.ok) {
+          const erroInsert = await respInsert.text();
+          console.log("Erro ao salvar no banco:", f.name, erroInsert);
+          continue;
+        }
+
+        processados++;
+
+        await atualizarControleSync({
+          em_execucao: true,
+          ultima_execucao: new Date().toISOString(),
+          total_processados: processados
+        });
+      } catch (e) {
+        console.log("Erro ao processar arquivo:", f.name, e.message);
+      }
     }
+
+    const idsBancoAtualizado = await buscarIdsBanco();
+    const arquivosDriveAtualizados = await buscarArquivosDrive();
+    const faltantesRestantes = arquivosDriveAtualizados.filter(f => !idsBancoAtualizado.has(f.id)).length;
 
     await atualizarControleSync({
       em_execucao: false,
       ultima_execucao: new Date().toISOString(),
       total_processados: processados
     });
+
+    if (faltantesRestantes > 0) {
+      setTimeout(() => {
+        executarSyncEmBackground();
+      }, 3000);
+    }
   } catch (e) {
+    console.log("Erro geral executarSyncEmBackground:", e.message);
+
     await atualizarControleSync({
       em_execucao: false,
       ultima_execucao: new Date().toISOString()
@@ -509,10 +641,18 @@ app.get("/sync", async (req, res) => {
   try {
     const controle = await buscarControleSync();
 
-    if (controle?.em_execucao) {
+    if (controle?.em_execucao && !execucaoTravada(controle)) {
       return res.json({
         mensagem: "Processamento já está em execução",
         novos_processados: 0
+      });
+    }
+
+    if (execucaoTravada(controle)) {
+      await atualizarControleSync({
+        em_execucao: false,
+        total_processados: 0,
+        ultima_execucao: new Date().toISOString()
       });
     }
 
@@ -561,6 +701,7 @@ app.get("/reprocess", async (req, res) => {
       const proc = await processarPDF(item.id);
       const val = verificarValidade(item.data);
       const divergencia = avaliarDivergencia(item.dlt, item.serie);
+      const nomePadronizado = montarNomePadrao(item.dlt, item.serie, item.data);
 
       await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${item.id}`, {
         method: "PATCH",
@@ -571,6 +712,7 @@ app.get("/reprocess", async (req, res) => {
           validade: val.valido,
           vencimento: val.vencimento,
           mes_ano_validade: val.mes_ano,
+          nome_download: nomePadronizado,
           divergente: divergencia.divergente,
           serie_esperada: divergencia.serie_esperada,
           motivo_divergencia: divergencia.motivo_divergencia
@@ -612,6 +754,7 @@ app.get("/teste/:id", async (req, res) => {
   const resultado = await processarPDF(req.params.id);
   res.json(resultado);
 });
+
 app.get("/pendentes", async (req, res) => {
   try {
     const idsBanco = await buscarIdsBanco();
@@ -629,6 +772,32 @@ app.get("/pendentes", async (req, res) => {
       total: pendentes.length,
       arquivos: pendentes
     });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/download/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,nome_download`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    if (!data || data.length === 0) {
+      return res.status(404).send("Arquivo não encontrado");
+    }
+
+    const nome = data[0].nome_download || `arquivo_${id}.pdf`;
+    const buffer = await baixarArquivoDrive(id);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${nome}"`);
+    res.send(buffer);
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
