@@ -1,6 +1,7 @@
 import express from "express";
 import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
 import fetch from "node-fetch";
+import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const app = express();
@@ -12,9 +13,24 @@ app.use(express.json());
 const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
-const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
+
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certificados@calcium-bot-493618-e2.iam.gserviceaccount.com";
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n");
 
 const LIMITE = 50;
+
+// =========================
+// GOOGLE DRIVE AUTH
+// =========================
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    client_email: GOOGLE_CLIENT_EMAIL,
+    private_key: GOOGLE_PRIVATE_KEY
+  },
+  scopes: ["https://www.googleapis.com/auth/drive"]
+});
+
+const drive = google.drive({ version: "v3", auth });
 
 // =========================
 // HELPERS
@@ -174,6 +190,21 @@ function execucaoTravada(controle) {
   const agora = Date.now();
 
   return agora - ultima > 5 * 60 * 1000;
+}
+
+// =========================
+// GOOGLE DRIVE
+// =========================
+async function excluirArquivoDrive(fileId) {
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
+    throw new Error("GOOGLE_CLIENT_EMAIL ou GOOGLE_PRIVATE_KEY não configurados");
+  }
+
+  await drive.files.delete({
+    fileId
+  });
+
+  return true;
 }
 
 // =========================
