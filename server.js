@@ -862,4 +862,62 @@ app.get("/download/:id", async (req, res) => {
   }
 });
 
+// =========================
+// EXCLUIR CERTIFICADO DUPLICADO
+// =========================
+app.delete("/certificados/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const busca = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,nome_original,duplicado,motivo_divergencia`,
+      { headers: supabaseHeaders() }
+    );
+
+    const registros = await busca.json();
+
+    if (!registros || registros.length === 0) {
+      return res.status(404).json({ erro: "Certificado não encontrado" });
+    }
+
+    const certificado = registros[0];
+
+    const ehDuplicado =
+      certificado.duplicado === true ||
+      certificado.motivo_divergencia === "Duplicidade (DLT + Data)";
+
+    if (!ehDuplicado) {
+      return res.status(400).json({
+        erro: "Exclusão permitida apenas para certificados duplicados"
+      });
+    }
+
+    await excluirArquivoDrive(id);
+
+    const del = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}`,
+      {
+        method: "DELETE",
+        headers: supabaseHeaders()
+      }
+    );
+
+    if (!del.ok) {
+      const erroBanco = await del.text();
+      return res.status(500).json({
+        erro: `Falha ao excluir no banco: ${erroBanco}`
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Certificado duplicado excluído com sucesso",
+      id,
+      nome_original: certificado.nome_original
+    });
+  } catch (e) {
+    return res.status(500).json({ erro: e.message });
+  }
+});
+
 app.listen(3000, () => console.log("Servidor rodando 🚀"));
