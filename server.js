@@ -1,7 +1,6 @@
 import express from "express";
 import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
 import fetch from "node-fetch";
-import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const app = express();
@@ -11,27 +10,11 @@ app.use(express.json());
 // CONFIG
 // =========================
 const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
-const FOLDER_ID = "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";";
+const FOLDER_ID = process.env.FOLDER_ID || "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 
-const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certificados@calcium-bot-493618-e2.iam.gserviceaccount.com";
-const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n");
-
 const LIMITE = 50;
-
-// =========================
-// GOOGLE DRIVE AUTH
-// =========================
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    client_email: GOOGLE_CLIENT_EMAIL,
-    private_key: GOOGLE_PRIVATE_KEY
-  },
-  scopes: ["https://www.googleapis.com/auth/drive"]
-});
-
-const drive = google.drive({ version: "v3", auth });
 
 // =========================
 // HELPERS
@@ -90,7 +73,6 @@ function montarNomePadrao(dlt, serie, dataISO) {
   return `${tag}_${serie}_${dataFormatada}.pdf`;
 }
 
-// validade por mês/ano + 1 ano
 function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null, mes_ano: null };
 
@@ -191,21 +173,6 @@ function execucaoTravada(controle) {
   const agora = Date.now();
 
   return agora - ultima > 5 * 60 * 1000;
-}
-
-// =========================
-// GOOGLE DRIVE
-// =========================
-async function excluirArquivoDrive(fileId) {
-  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    throw new Error("GOOGLE_CLIENT_EMAIL ou GOOGLE_PRIVATE_KEY não configurados");
-  }
-
-  await drive.files.delete({
-    fileId
-  });
-
-  return true;
 }
 
 // =========================
@@ -417,7 +384,7 @@ async function processarPDF(fileId) {
 }
 
 // =========================
-// CONTROLE / DRIVE
+// CONTROLE / HISTÓRICO
 // =========================
 async function atualizarControleSync(payload) {
   await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
@@ -445,6 +412,32 @@ async function buscarIdsBanco() {
   while (true) {
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?select=id&limit=${limit}&offset=${offset}`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    if (!data || data.length === 0) break;
+
+    for (const item of data) {
+      ids.add(item.id);
+    }
+
+    if (data.length < limit) break;
+    offset += limit;
+  }
+
+  return ids;
+}
+
+async function buscarIdsExcluidos() {
+  const ids = new Set();
+  const limit = 1000;
+  let offset = 0;
+
+  while (true) {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_excluidos?select=id&limit=${limit}&offset=${offset}`,
       { headers: supabaseHeaders() }
     );
 
@@ -511,12 +504,14 @@ async function executarSyncEmBackground() {
     });
 
     const idsBanco = await buscarIdsBanco();
+    const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
 
     let processados = 0;
 
     for (const f of arquivosDrive) {
       if (idsBanco.has(f.id)) continue;
+      if (idsExcluidos.has(f.id)) continue;
       if (processados >= LIMITE) break;
 
       try {
@@ -551,7 +546,7 @@ async function executarSyncEmBackground() {
             dlt: meta.dlt,
             serie: meta.serie,
             data: meta.data,
-            status: status,
+            status,
             validade: val.valido,
             vencimento: val.vencimento,
             mes_ano_validade: val.mes_ano,
@@ -581,8 +576,11 @@ async function executarSyncEmBackground() {
     }
 
     const idsBancoAtualizado = await buscarIdsBanco();
+    const idsExcluidosAtualizado = await buscarIdsExcluidos();
     const arquivosDriveAtualizados = await buscarArquivosDrive();
-    const faltantesRestantes = arquivosDriveAtualizados.filter(f => !idsBancoAtualizado.has(f.id)).length;
+    const faltantesRestantes = arquivosDriveAtualizados.filter(
+      f => !idsBancoAtualizado.has(f.id) && !idsExcluidosAtualizado.has(f.id)
+    ).length;
 
     await atualizarControleSync({
       em_execucao: false,
@@ -617,10 +615,13 @@ app.get("/status", async (req, res) => {
     const controle = await buscarControleSync();
     const totalBanco = await contarCertificadosBanco();
     const idsBanco = await buscarIdsBanco();
+    const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
 
     const totalDrive = arquivosDrive.length;
-    const faltantes = arquivosDrive.filter(f => !idsBanco.has(f.id)).length;
+    const faltantes = arquivosDrive.filter(
+      f => !idsBanco.has(f.id) && !idsExcluidos.has(f.id)
+    ).length;
 
     res.json({
       id: controle?.id || 1,
@@ -673,6 +674,36 @@ app.get("/divergentes", async (req, res) => {
 
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?select=*&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "count=exact"
+        }
+      }
+    );
+
+    const data = await r.json();
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: data
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/historico-exclusoes", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_excluidos?select=*&order=excluido_em.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -817,10 +848,11 @@ app.get("/teste/:id", async (req, res) => {
 app.get("/pendentes", async (req, res) => {
   try {
     const idsBanco = await buscarIdsBanco();
+    const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
 
     const pendentes = arquivosDrive
-      .filter(f => !idsBanco.has(f.id))
+      .filter(f => !idsBanco.has(f.id) && !idsExcluidos.has(f.id))
       .map(f => ({
         id: f.id,
         nome_original: f.name
@@ -862,15 +894,12 @@ app.get("/download/:id", async (req, res) => {
   }
 });
 
-// =========================
-// EXCLUIR CERTIFICADO DUPLICADO
-// =========================
 app.delete("/certificados/:id", async (req, res) => {
   try {
     const id = req.params.id;
 
     const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,nome_original,duplicado,motivo_divergencia`,
+      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=*`,
       { headers: supabaseHeaders() }
     );
 
@@ -892,7 +921,25 @@ app.delete("/certificados/:id", async (req, res) => {
       });
     }
 
-    await excluirArquivoDrive(id);
+    const insereHistorico = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_excluidos`,
+      {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({
+          ...certificado,
+          motivo_exclusao: "Exclusão manual pelo Lovable - duplicidade",
+          excluido_em: new Date().toISOString()
+        })
+      }
+    );
+
+    if (!insereHistorico.ok) {
+      const erroHistorico = await insereHistorico.text();
+      return res.status(500).json({
+        erro: `Falha ao gravar histórico: ${erroHistorico}`
+      });
+    }
 
     const del = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}`,
@@ -905,13 +952,13 @@ app.delete("/certificados/:id", async (req, res) => {
     if (!del.ok) {
       const erroBanco = await del.text();
       return res.status(500).json({
-        erro: `Falha ao excluir no banco: ${erroBanco}`
+        erro: `Falha ao excluir da base principal: ${erroBanco}`
       });
     }
 
     return res.json({
       sucesso: true,
-      mensagem: "Certificado duplicado excluído com sucesso",
+      mensagem: "Certificado removido da base e registrado no histórico",
       id,
       nome_original: certificado.nome_original
     });
