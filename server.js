@@ -24,6 +24,7 @@ const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certifi
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
 const LOGO_URL = process.env.LOGO_URL || "https://drive.google.com/file/d/1RFnwmMsi1e-x8ktTzb-2IZXTRuXEng9x/view?usp=drive_link";
 
+
 const LIMITE = 50;
 
 // =========================
@@ -148,6 +149,16 @@ function verificarValidade(dataISO) {
 
 function somenteNumeroBR(texto) {
   return /^-?\d+,\d+$/.test((texto || "").trim());
+}
+
+function extrairNumeroCertificado(texto) {
+  if (!texto) return "";
+
+  const match = String(texto).match(/LT\s*[-–]?\s*(\d{3})\s*(\d{3})/i);
+
+  if (!match) return "";
+
+  return `LT-${match[1]} ${match[2]}`;
 }
 
 function agruparLinhasPorY(items, tolerancia = 2.2) {
@@ -292,6 +303,7 @@ function montarHtmlRelatorioDia(registros, dataRelatorio) {
               <td>${escaparHtml(normalizarDLT(c.dlt) || c.dlt)}</td>
               <td>${escaparHtml(formatarDataISOParaBR(c.data))}</td>
               <td>${escaparHtml(c.mes_ano_validade || "")}</td>
+              <td>${escaparHtml(c.certificado || "")}</td>
               <td>${escaparHtml(String(p1.incerteza ?? "-"))}</td>
               <td>${escaparHtml(String(p1.erro ?? "-"))}</td>
               <td>${escaparHtml(String(p1.soma ?? "-"))}</td>
@@ -320,6 +332,7 @@ function montarHtmlRelatorioDia(registros, dataRelatorio) {
                 <th rowspan="2">TAG</th>
                 <th rowspan="2">Calibrado em</th>
                 <th rowspan="2">Validade</th>
+                <th rowspan="2">Certificado</th>
                 <th rowspan="2">Incerteza ± U</th>
                 <th colspan="2">-20,0°C</th>
                 <th colspan="2">0,0°C</th>
@@ -609,6 +622,7 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
   let dlt = "";
   let serie = "";
   let data = "";
+  let certificado = "";
 
   let m = texto.match(/(\d{8})\s+DLT-(\d{4})/i);
   if (m) {
@@ -639,6 +653,8 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
     data = formatarDataBRparaISO(dataMatch[1]);
   }
 
+  certificado = extrairNumeroCertificado(texto);
+
   const baseNome = extrairDados(nomeOriginal);
   if (!dlt && baseNome.dlt) dlt = soDigitos(baseNome.dlt).padStart(4, "0");
   if (!serie && baseNome.serie) serie = soDigitos(baseNome.serie);
@@ -647,7 +663,8 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
   return {
     dlt: dlt ? soDigitos(dlt).padStart(4, "0") : "",
     serie: serie ? soDigitos(serie) : "",
-    data: data || ""
+    data: data || "",
+    certificado: certificado || ""
   };
 }
 
@@ -755,12 +772,15 @@ async function extrairTabelaPorColunas(buffer) {
 async function processarPDF(fileId) {
   try {
     const buffer = await baixarArquivoDrive(fileId);
+    const { texto } = await extrairTextoELinhasDoPDF(buffer);
+    const meta = extrairMetadadosDoTexto(texto);
     const tabela = await extrairTabelaPorColunas(buffer);
 
     if (!tabela.ok) {
       return {
         status: "ERRO",
         pontos: [],
+        certificado: meta.certificado || "",
         debug: tabela.debug || {}
       };
     }
@@ -769,12 +789,14 @@ async function processarPDF(fileId) {
 
     return {
       status: aprovado ? "APROVADO" : "REPROVADO",
-      pontos: tabela.pontos
+      pontos: tabela.pontos,
+      certificado: meta.certificado || ""
     };
   } catch (e) {
     return {
       status: "ERRO",
       pontos: [],
+      certificado: "",
       debug: { erro: e.message }
     };
   }
@@ -943,6 +965,7 @@ async function executarSyncEmBackground() {
             dlt: meta.dlt,
             serie: meta.serie,
             data: meta.data,
+            certificado: meta.certificado || "",
             status,
             validade: val.valido,
             vencimento: val.vencimento,
@@ -1227,6 +1250,7 @@ app.get("/reprocess", async (req, res) => {
         body: JSON.stringify({
           status: proc.status,
           pontos: proc.pontos,
+          certificado: proc.certificado || "",
           validade: val.valido,
           vencimento: val.vencimento,
           mes_ano_validade: val.mes_ano,
@@ -1339,13 +1363,14 @@ app.delete("/certificados/:id", async (req, res) => {
 
     const certificado = registros[0];
 
-    const ehDuplicado =
+    const podeExcluir =
+      certificado.divergente === true ||
       certificado.duplicado === true ||
-      certificado.motivo_divergencia === "Duplicidade (DLT + Data)";
+      !!certificado.motivo_divergencia;
 
-    if (!ehDuplicado) {
+    if (!podeExcluir) {
       return res.status(400).json({
-        erro: "Exclusão permitida apenas para certificados duplicados"
+        erro: "Exclusão permitida apenas para certificados divergentes"
       });
     }
 
@@ -1356,7 +1381,7 @@ app.delete("/certificados/:id", async (req, res) => {
         headers: supabaseHeaders(),
         body: JSON.stringify({
           ...certificado,
-          motivo_exclusao: "Exclusão manual pelo Lovable - duplicidade",
+          motivo_exclusao: `Exclusão manual pelo Lovable - ${certificado.motivo_divergencia || "Divergente"}`,
           excluido_em: new Date().toISOString()
         })
       }
@@ -1392,6 +1417,30 @@ app.delete("/certificados/:id", async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/relatorio-dia/dados", async (req, res) => {
+  try {
+    const dataRelatorio = req.query.data || obterHojeISO();
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const todos = await r.json();
+    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
+      mesmaData(item.criado_em, dataRelatorio)
+    );
+
+    res.json({
+      data_relatorio: dataRelatorio,
+      total: dados.length,
+      registros: dados
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
   }
 });
 
