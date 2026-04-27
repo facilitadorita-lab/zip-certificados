@@ -636,9 +636,19 @@ async function executarSyncDLH() {
         continue;
       }
 
+      const certificadoFinal = proc.certificado || meta.certificado || "";
+
       const val = verificarValidade(meta.data);
       const divergencia = avaliarDivergencia(meta.dlh, meta.serie);
       const nomePadronizado = montarNomePadrao(meta.dlh, meta.serie, meta.data);
+
+      const dupCheck = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id&dlh=eq.${encodeURIComponent(meta.dlh)}&serie=eq.${encodeURIComponent(meta.serie)}&data=eq.${encodeURIComponent(meta.data)}&certificado=eq.${encodeURIComponent(certificadoFinal)}`,
+        { headers: supabaseHeaders() }
+      );
+
+      const duplicados = await dupCheck.json();
+      const duplicado = Array.isArray(duplicados) && duplicados.length > 0;
 
       const respInsert = await fetch(`${SUPABASE_URL}/rest/v1/certificados_dlh`, {
         method: "POST",
@@ -650,17 +660,19 @@ async function executarSyncDLH() {
           dlh: meta.dlh,
           serie: meta.serie,
           data: meta.data,
-          certificado: proc.certificado || meta.certificado || "",
+          certificado: certificadoFinal,
           status: proc.status,
           validade: val.valido,
           vencimento: val.vencimento,
           mes_ano_validade: val.mes_ano,
           pontos_umidade: proc.pontos_umidade || [],
           pontos_temperatura: proc.pontos_temperatura || [],
-          divergente: divergencia.divergente,
-          duplicado: false,
+          divergente: divergencia.divergente || duplicado,
+          duplicado: duplicado,
           serie_esperada: divergencia.serie_esperada,
-          motivo_divergencia: divergencia.motivo_divergencia,
+          motivo_divergencia: duplicado
+            ? "Certificado duplicado"
+            : divergencia.motivo_divergencia,
           criado_em: new Date().toISOString()
         })
       });
@@ -697,7 +709,7 @@ async function executarSyncDLH() {
 // =========================
 async function executarReprocessDLH(limit = 50, offset = 0) {
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data&limit=${limit}&offset=${offset}`,
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data,certificado&limit=${limit}&offset=${offset}`,
     { headers: supabaseHeaders() }
   );
 
@@ -717,13 +729,26 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
     try {
       const proc = await processarPDFDLH(item.id, item.nome_original);
       const meta = proc.meta || {};
+
       const dataFinal = meta.data || item.data;
       const dlhFinal = meta.dlh || item.dlh;
       const serieFinal = meta.serie || item.serie;
+      const certificadoFinal = proc.certificado || meta.certificado || item.certificado || "";
 
       const val = verificarValidade(dataFinal);
       const divergencia = avaliarDivergencia(dlhFinal, serieFinal);
       const nomePadronizado = montarNomePadrao(dlhFinal, serieFinal, dataFinal);
+
+      const dupCheck = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id&dlh=eq.${encodeURIComponent(dlhFinal)}&serie=eq.${encodeURIComponent(serieFinal)}&data=eq.${encodeURIComponent(dataFinal)}&certificado=eq.${encodeURIComponent(certificadoFinal)}`,
+        { headers: supabaseHeaders() }
+      );
+
+      const duplicados = await dupCheck.json();
+
+      const duplicado =
+        Array.isArray(duplicados) &&
+        duplicados.some(d => d.id !== item.id);
 
       const update = await fetch(
         `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${item.id}`,
@@ -735,16 +760,19 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
             dlh: dlhFinal,
             serie: serieFinal,
             data: dataFinal,
-            certificado: proc.certificado || meta.certificado || "",
+            certificado: certificadoFinal,
             status: proc.status,
             validade: val.valido,
             vencimento: val.vencimento,
             mes_ano_validade: val.mes_ano,
             pontos_umidade: proc.pontos_umidade || [],
             pontos_temperatura: proc.pontos_temperatura || [],
-            divergente: divergencia.divergente,
+            duplicado: duplicado,
+            divergente: divergencia.divergente || duplicado,
             serie_esperada: divergencia.serie_esperada,
-            motivo_divergencia: divergencia.motivo_divergencia
+            motivo_divergencia: duplicado
+              ? "Certificado duplicado"
+              : divergencia.motivo_divergencia
           })
         }
       );
@@ -774,7 +802,6 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
     erros
   };
 }
-
 // =========================
 // ROTAS
 // =========================
@@ -861,7 +888,7 @@ app.get("/dlh/divergentes", async (req, res) => {
     const offset = Number(req.query.offset || 0);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&or=(divergente.eq.true,duplicado.eq.true)&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&or=(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null,status.eq.ERRO)&order=criado_em.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -870,6 +897,20 @@ app.get("/dlh/divergentes", async (req, res) => {
       }
     );
 
+    const data = await r.json();
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : (Array.isArray(data) ? data.length : 0);
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: Array.isArray(data) ? data : []
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
     const data = await r.json();
     const contentRange = r.headers.get("content-range");
     const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
