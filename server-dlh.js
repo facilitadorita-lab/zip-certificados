@@ -395,13 +395,6 @@ async function extrairTabelaDLH(buffer) {
 
     const valores = nums.map(n => n.valor);
 
-    // =========================
-    // UMIDADE
-    // Estrutura esperada:
-    // indicado | padrão | erro | temperatura referenciada | incerteza | k | veff
-    // Exemplo:
-    // 14,0 | 10,0 | 4,0 | 20 | 0,4 | 2,00 | ∞
-    // =========================
     if (
       pontosUmidade.length < 3 &&
       nums.length >= 5 &&
@@ -428,13 +421,6 @@ async function extrairTabelaDLH(buffer) {
       continue;
     }
 
-    // =========================
-    // TEMPERATURA
-    // Estrutura esperada:
-    // indicado | padrão | erro | incerteza | k | veff
-    // Exemplo:
-    // -19,9 | -20,0 | 0,1 | 0,2 | 2,00 | ∞
-    // =========================
     if (
       pontosTemperatura.length < 4 &&
       nums.length >= 4 &&
@@ -672,6 +658,7 @@ async function executarSyncDLH() {
           pontos_umidade: proc.pontos_umidade || [],
           pontos_temperatura: proc.pontos_temperatura || [],
           divergente: divergencia.divergente,
+          duplicado: false,
           serie_esperada: divergencia.serie_esperada,
           motivo_divergencia: divergencia.motivo_divergencia,
           criado_em: new Date().toISOString()
@@ -861,7 +848,7 @@ app.get("/dlh/certificados", async (req, res) => {
       total,
       limit,
       offset,
-      registros: data
+      registros: Array.isArray(data) ? data : []
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -874,7 +861,7 @@ app.get("/dlh/divergentes", async (req, res) => {
     const offset = Number(req.query.offset || 0);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&or=(divergente.eq.true,duplicado.eq.true)&order=data.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -891,7 +878,7 @@ app.get("/dlh/divergentes", async (req, res) => {
       total,
       limit,
       offset,
-      registros: data
+      registros: Array.isArray(data) ? data : []
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -941,7 +928,7 @@ app.get("/dlh/download/:id", async (req, res) => {
 
     const data = await r.json();
 
-    if (!data || data.length === 0) {
+    if (!Array.isArray(data) || data.length === 0) {
       return res.status(404).send("Arquivo não encontrado");
     }
 
@@ -956,6 +943,41 @@ app.get("/dlh/download/:id", async (req, res) => {
   }
 });
 
+app.get("/dlh/historico-exclusoes", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh_excluidos?select=*&order=excluido_em.desc&limit=${limit}&offset=${offset}`,
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "count=exact"
+        }
+      }
+    );
+
+    const data = await r.json();
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : Array.isArray(data) ? data.length : 0;
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: Array.isArray(data) ? data : []
+    });
+  } catch (e) {
+    res.json({
+      total: 0,
+      limit: Number(req.query.limit || 100),
+      offset: Number(req.query.offset || 0),
+      registros: []
+    });
+  }
+});
+
 app.delete("/dlh/certificados/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -967,7 +989,7 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
 
     const registros = await busca.json();
 
-    if (!registros || registros.length === 0) {
+    if (!Array.isArray(registros) || registros.length === 0) {
       return res.status(404).json({ erro: "Certificado DLH não encontrado" });
     }
 
@@ -976,12 +998,25 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
     const podeExcluir =
       certificado.divergente === true ||
       certificado.duplicado === true ||
-      !!certificado.motivo_divergencia;
+      !!certificado.motivo_divergencia ||
+      certificado.motivo_divergencia === "Série divergente" ||
+      certificado.motivo_divergencia === "DLH inválido" ||
+      certificado.motivo_divergencia === "DLH não encontrado na base";
 
     if (!podeExcluir) {
       return res.status(400).json({
-        erro: "Exclusão permitida apenas para certificados divergentes"
+        erro: "Exclusão permitida apenas para certificados divergentes, duplicados ou com inconsistência de DLH/série."
       });
+    }
+
+    let motivoExclusao = "Exclusão manual pelo Lovable";
+
+    if (certificado.duplicado === true) {
+      motivoExclusao += " - Certificado duplicado";
+    } else if (certificado.motivo_divergencia) {
+      motivoExclusao += ` - ${certificado.motivo_divergencia}`;
+    } else if (certificado.divergente === true) {
+      motivoExclusao += " - Divergente";
     }
 
     const insereHistorico = await fetch(
@@ -991,7 +1026,7 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
         headers: supabaseHeaders(),
         body: JSON.stringify({
           ...certificado,
-          motivo_exclusao: `Exclusão manual pelo Lovable - ${certificado.motivo_divergencia || "Divergente"}`,
+          motivo_exclusao: motivoExclusao,
           excluido_em: new Date().toISOString()
         })
       }
@@ -1005,10 +1040,13 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
       });
     }
 
-    const del = await fetch(`${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}`, {
-      method: "DELETE",
-      headers: supabaseHeaders()
-    });
+    const del = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}`,
+      {
+        method: "DELETE",
+        headers: supabaseHeaders()
+      }
+    );
 
     if (!del.ok) {
       const erroBanco = await del.text();
@@ -1020,9 +1058,10 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
 
     res.json({
       sucesso: true,
-      mensagem: "Certificado DLH removido da base e registrado no histórico",
+      mensagem: "Certificado DLH excluído e registrado no histórico.",
       id,
-      nome_original: certificado.nome_original
+      nome_original: certificado.nome_original,
+      motivo_exclusao: motivoExclusao
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1070,7 +1109,8 @@ app.get("/dlh/exportar-csv", async (req, res) => {
         "Validade",
         "Certificado",
         "Status",
-        "Divergente"
+        "Divergente",
+        "Duplicado"
       ],
       ...(Array.isArray(data) ? data : []).map(d => [
         d.dlh || "",
@@ -1079,7 +1119,8 @@ app.get("/dlh/exportar-csv", async (req, res) => {
         d.mes_ano_validade || "",
         d.certificado || "",
         d.status || "",
-        d.divergente ? "SIM" : "NÃO"
+        d.divergente ? "SIM" : "NÃO",
+        d.duplicado ? "SIM" : "NÃO"
       ])
     ];
 
