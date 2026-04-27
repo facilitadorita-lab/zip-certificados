@@ -384,7 +384,7 @@ async function extrairTabelaDLH(buffer) {
       modo = "UMIDADE";
       continue;
     }
-    if (t.includes("MEDIDOR DE TEMPERATURA")) {
+    if (t.includes("MEDIDOR DE TEMPERATURA") || t.includes("SENSOR IN")) {
       modo = "TEMPERATURA";
       continue;
     }
