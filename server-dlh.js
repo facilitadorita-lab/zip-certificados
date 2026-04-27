@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
 
 const app = express();
 app.use(express.json());
@@ -22,6 +23,7 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
+
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -37,13 +39,6 @@ const googleAuth =
     : null;
 
 const drive = googleAuth ? google.drive({ version: "v3", auth: googleAuth }) : null;
-
-// =========================
-// MAPA DLH
-// =========================
-const MAPA_LOGGERS_DLH = {
-  "DLH-0005": "37326189"
-};
 
 // =========================
 // HELPERS
@@ -67,12 +62,6 @@ function fmt2(n) {
 
 function soDigitos(texto) {
   return String(texto || "").replace(/\D/g, "");
-}
-
-function normalizarDLH(valor) {
-  const digitos = soDigitos(valor);
-  if (!digitos) return "";
-  return `DLH-${digitos.padStart(4, "0")}`;
 }
 
 function formatarDataBRparaISO(dataBR) {
@@ -259,6 +248,10 @@ async function buscarArquivosDriveDLH() {
     const res = await fetch(url);
     const data = await res.json();
 
+    if (data.error) {
+      throw new Error(data.error.message || "Erro ao buscar arquivos no Google Drive");
+    }
+
     arquivos.push(...(data.files || []));
     pageToken = data.nextPageToken || null;
   } while (pageToken);
@@ -373,10 +366,10 @@ async function extrairTabelaDLH(buffer) {
 
   for (const linha of linhas) {
     const indicado = numeroNaFaixa(linha, 40, 95);
-    const padrao = numeroNaFaixa(linha, 160, 215);
-    const erroUmidade = numeroNaFaixa(linha, 270, 315);
-    const erroTemperatura = numeroNaFaixa(linha, 315, 350);
-    const incerteza = numeroNaFaixa(linha, 400, 450);
+    const padrao = numeroNaFaixa(linha, 150, 225);
+    const erroUmidade = numeroNaFaixa(linha, 250, 320);
+    const erroTemperatura = numeroNaFaixa(linha, 300, 365);
+    const incerteza = numeroNaFaixa(linha, 380, 455);
 
     if (indicado && padrao && erroUmidade && incerteza) {
       const indicadoNum = parseBR(indicado.text);
@@ -526,9 +519,12 @@ async function buscarIdsBancoDLH() {
     );
 
     const data = await r.json();
+
     if (!Array.isArray(data) || data.length === 0) break;
 
-    for (const item of data) ids.add(item.id);
+    for (const item of data) {
+      ids.add(item.id);
+    }
 
     if (data.length < limit) break;
     offset += limit;
@@ -549,9 +545,12 @@ async function buscarIdsExcluidosDLH() {
     );
 
     const data = await r.json();
+
     if (!Array.isArray(data) || data.length === 0) break;
 
-    for (const item of data) ids.add(item.id);
+    for (const item of data) {
+      ids.add(item.id);
+    }
 
     if (data.length < limit) break;
     offset += limit;
@@ -561,13 +560,16 @@ async function buscarIdsExcluidosDLH() {
 }
 
 async function contarCertificadosBancoDLH() {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados_dlh?select=id`, {
-    headers: {
-      ...supabaseHeaders(),
-      Prefer: "count=exact",
-      Range: "0-0"
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id`,
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "count=exact",
+        Range: "0-0"
+      }
     }
-  });
+  );
 
   const contentRange = r.headers.get("content-range");
   if (!contentRange) return 0;
@@ -634,10 +636,12 @@ async function executarSyncDLH() {
 
       if (!respInsert.ok) {
         const erroInsert = await respInsert.text();
+
         erros.push({
           arquivo: f.name,
           motivo: erroInsert
         });
+
         continue;
       }
 
@@ -856,6 +860,7 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
 
     if (!insereHistorico.ok) {
       const erroHistorico = await insereHistorico.text();
+
       return res.status(500).json({
         erro: `Falha ao gravar histórico: ${erroHistorico}`
       });
@@ -868,6 +873,7 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
 
     if (!del.ok) {
       const erroBanco = await del.text();
+
       return res.status(500).json({
         erro: `Falha ao excluir da base principal: ${erroBanco}`
       });
