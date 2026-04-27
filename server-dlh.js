@@ -23,7 +23,6 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
-
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -209,6 +208,20 @@ function numeroNaFaixa(linha, xMin, xMax) {
   candidatos.sort((a, b) => a.x - b.x);
   return candidatos[0];
 }
+
+function numerosDaLinha(linha) {
+  return linha.items
+    .filter(i => somenteNumeroBR(i.text))
+    .sort((a, b) => a.x - b.x)
+    .map(i => ({
+      text: i.text,
+      valor: parseBR(i.text),
+      x: i.x,
+      y: i.y
+    }))
+    .filter(i => !Number.isNaN(i.valor));
+}
+
 // =========================
 // DRIVE
 // =========================
@@ -288,6 +301,7 @@ async function baixarArquivoDrive(fileId) {
 
   return Buffer.from(await res.arrayBuffer());
 }
+
 // =========================
 // PDF
 // =========================
@@ -365,6 +379,7 @@ function extrairMetadadosDLH(texto) {
     certificado: certificado || ""
   };
 }
+
 // =========================
 // EXTRAÇÃO TABELA DLH
 // =========================
@@ -374,98 +389,121 @@ async function extrairTabelaDLH(buffer) {
   const pontosUmidade = [];
   const pontosTemperatura = [];
 
-  let modo = null; // "UMIDADE" | "TEMPERATURA"
-
   for (const linha of linhas) {
-    const t = (linha.texto || "").toUpperCase();
+    const nums = numerosDaLinha(linha);
+    if (nums.length < 4) continue;
 
-    // Detecta seção
-    if (t.includes("MEDIDOR DE UMIDADE")) {
-      modo = "UMIDADE";
-      continue;
-    }
-    if (t.includes("MEDIDOR DE TEMPERATURA") || t.includes("SENSOR IN")) {
-      modo = "TEMPERATURA";
-      continue;
-    }
-
-    const indicado = numeroNaFaixa(linha, 40, 95);
-    const padrao = numeroNaFaixa(linha, 150, 225);
-    const incerteza = numeroNaFaixa(linha, 400, 455);
-
-    if (!indicado || !padrao || !incerteza) continue;
-
-    const indicadoNum = parseBR(indicado.text);
-    const padraoNum = parseBR(padrao.text);
-    const incertezaNum = parseBR(incerteza.text);
-
-    if (
-      Number.isNaN(indicadoNum) ||
-      Number.isNaN(padraoNum) ||
-      Number.isNaN(incertezaNum)
-    ) {
-      continue;
-    }
+    const valores = nums.map(n => n.valor);
 
     // =========================
     // UMIDADE
+    // Estrutura esperada:
+    // indicado | padrão | erro | temperatura referenciada | incerteza | k | veff
+    // Exemplo:
+    // 14,0 | 10,0 | 4,0 | 20 | 0,4 | 2,00 | ∞
     // =========================
-    if (modo === "UMIDADE") {
-      const erroUmidade = numeroNaFaixa(linha, 250, 315);
-      if (!erroUmidade) continue;
+    if (
+      pontosUmidade.length < 3 &&
+      nums.length >= 5 &&
+      valores[1] >= 0 &&
+      valores[1] <= 100 &&
+      valores[3] >= 10 &&
+      valores[3] <= 30 &&
+      Math.abs(valores[4]) <= 5
+    ) {
+      const indicadoNum = valores[0];
+      const padraoNum = valores[1];
+      const erroNum = valores[2];
+      const incertezaNum = valores[4];
 
-      const erroNum = parseBR(erroUmidade.text);
-      if (Number.isNaN(erroNum)) continue;
+      pontosUmidade.push({
+        ponto: pontosUmidade.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
 
-      if (padraoNum >= 0 && padraoNum <= 100 && pontosUmidade.length < 3) {
-        pontosUmidade.push({
-          ponto: pontosUmidade.length + 1,
-          indicado: fmt2(indicadoNum),
-          padrao: fmt2(padraoNum),
-          erro: fmt2(erroNum),
-          incerteza: fmt2(Math.abs(incertezaNum)),
-          soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
-        });
-      }
+      continue;
     }
 
     // =========================
     // TEMPERATURA
+    // Estrutura esperada:
+    // indicado | padrão | erro | incerteza | k | veff
+    // Exemplo:
+    // -19,9 | -20,0 | 0,1 | 0,2 | 2,00 | ∞
     // =========================
-    if (modo === "TEMPERATURA") {
-      const erroTemperatura = numeroNaFaixa(linha, 330, 390);
-      if (!erroTemperatura) continue;
+    if (
+      pontosTemperatura.length < 4 &&
+      nums.length >= 4 &&
+      valores[1] >= -30 &&
+      valores[1] <= 70 &&
+      Math.abs(valores[2]) <= 5 &&
+      Math.abs(valores[3]) <= 5 &&
+      !(valores[1] >= 0 && valores[1] <= 100 && nums.length >= 5 && valores[3] >= 10 && valores[3] <= 30)
+    ) {
+      const indicadoNum = valores[0];
+      const padraoNum = valores[1];
+      const erroNum = valores[2];
+      const incertezaNum = valores[3];
 
-      const erroNum = parseBR(erroTemperatura.text);
-      if (Number.isNaN(erroNum)) continue;
-
-      if (padraoNum >= -30 && padraoNum <= 70 && pontosTemperatura.length < 4) {
-        pontosTemperatura.push({
-          ponto: pontosTemperatura.length + 1,
-          indicado: fmt2(indicadoNum),
-          padrao: fmt2(padraoNum),
-          erro: fmt2(erroNum),
-          incerteza: fmt2(Math.abs(incertezaNum)),
-          soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
-        });
-      }
+      pontosTemperatura.push({
+        ponto: pontosTemperatura.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
     }
   }
 
-  if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
+  const umidadeUnica = [];
+  const temperaturaUnica = [];
+
+  for (const p of pontosUmidade) {
+    if (!umidadeUnica.some(x => x.padrao === p.padrao)) {
+      umidadeUnica.push({ ...p, ponto: umidadeUnica.length + 1 });
+    }
+  }
+
+  for (const p of pontosTemperatura) {
+    if (!temperaturaUnica.some(x => x.padrao === p.padrao)) {
+      temperaturaUnica.push({ ...p, ponto: temperaturaUnica.length + 1 });
+    }
+  }
+
+  const pontosTemperaturaOrdenados = temperaturaUnica
+    .sort((a, b) => a.padrao - b.padrao)
+    .map((p, index) => ({ ...p, ponto: index + 1 }));
+
+  const pontosUmidadeOrdenados = umidadeUnica
+    .sort((a, b) => a.padrao - b.padrao)
+    .map((p, index) => ({ ...p, ponto: index + 1 }));
+
+  if (pontosUmidadeOrdenados.length < 3 || pontosTemperaturaOrdenados.length < 4) {
     return {
       ok: false,
-      pontos_umidade: pontosUmidade,
-      pontos_temperatura: pontosTemperatura
+      pontos_umidade: pontosUmidadeOrdenados,
+      pontos_temperatura: pontosTemperaturaOrdenados,
+      debug: {
+        motivo: "Quantidade insuficiente de pontos DLH",
+        umidade_encontrada: pontosUmidadeOrdenados.length,
+        temperatura_encontrada: pontosTemperaturaOrdenados.length,
+        linhas: linhas.map(l => l.texto)
+      }
     };
   }
 
   return {
     ok: true,
-    pontos_umidade: pontosUmidade.slice(0, 3),
-    pontos_temperatura: pontosTemperatura.slice(0, 4)
+    pontos_umidade: pontosUmidadeOrdenados.slice(0, 3),
+    pontos_temperatura: pontosTemperaturaOrdenados.slice(0, 4)
   };
 }
+
 // =========================
 // PROCESSAMENTO
 // =========================
@@ -668,6 +706,89 @@ async function executarSyncDLH() {
 }
 
 // =========================
+// REPROCESSAMENTO
+// =========================
+async function executarReprocessDLH(limit = 50, offset = 0) {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data&limit=${limit}&offset=${offset}`,
+    { headers: supabaseHeaders() }
+  );
+
+  const lista = await r.json();
+  let processados = 0;
+  const erros = [];
+
+  if (!Array.isArray(lista)) {
+    return {
+      mensagem: "Erro ao buscar registros para reprocessamento",
+      processados: 0,
+      erros: [{ erro: JSON.stringify(lista) }]
+    };
+  }
+
+  for (const item of lista) {
+    try {
+      const proc = await processarPDFDLH(item.id, item.nome_original);
+      const meta = proc.meta || {};
+      const dataFinal = meta.data || item.data;
+      const dlhFinal = meta.dlh || item.dlh;
+      const serieFinal = meta.serie || item.serie;
+
+      const val = verificarValidade(dataFinal);
+      const divergencia = avaliarDivergencia(dlhFinal, serieFinal);
+      const nomePadronizado = montarNomePadrao(dlhFinal, serieFinal, dataFinal);
+
+      const update = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${item.id}`,
+        {
+          method: "PATCH",
+          headers: supabaseHeaders(),
+          body: JSON.stringify({
+            nome_download: nomePadronizado,
+            dlh: dlhFinal,
+            serie: serieFinal,
+            data: dataFinal,
+            certificado: proc.certificado || meta.certificado || "",
+            status: proc.status,
+            validade: val.valido,
+            vencimento: val.vencimento,
+            mes_ano_validade: val.mes_ano,
+            pontos_umidade: proc.pontos_umidade || [],
+            pontos_temperatura: proc.pontos_temperatura || [],
+            divergente: divergencia.divergente,
+            serie_esperada: divergencia.serie_esperada,
+            motivo_divergencia: divergencia.motivo_divergencia
+          })
+        }
+      );
+
+      if (!update.ok) {
+        erros.push({
+          arquivo: item.nome_original,
+          erro: await update.text()
+        });
+        continue;
+      }
+
+      processados++;
+    } catch (e) {
+      erros.push({
+        arquivo: item.nome_original,
+        erro: e.message
+      });
+    }
+  }
+
+  return {
+    mensagem: "Reprocessamento DLH concluído",
+    processados,
+    offset,
+    proximo_offset: offset + processados,
+    erros
+  };
+}
+
+// =========================
 // ROTAS
 // =========================
 app.get("/", (req, res) => {
@@ -699,6 +820,18 @@ app.get("/dlh/status", async (req, res) => {
 app.get("/dlh/sync", async (req, res) => {
   try {
     const resultado = await executarSyncDLH();
+    res.json(resultado);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/reprocess", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 50);
+    const offset = Number(req.query.offset || 0);
+
+    const resultado = await executarReprocessDLH(limit, offset);
     res.json(resultado);
   } catch (e) {
     res.status(500).json({ erro: e.message });
