@@ -899,7 +899,11 @@ app.get("/dlh/divergentes", async (req, res) => {
 
     const data = await r.json();
     const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : (Array.isArray(data) ? data.length : 0);
+    const total = contentRange
+      ? Number(contentRange.split("/")[1])
+      : Array.isArray(data)
+        ? data.length
+        : 0;
 
     res.json({
       total,
