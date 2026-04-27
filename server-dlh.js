@@ -915,20 +915,6 @@ app.get("/dlh/divergentes", async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
-    const data = await r.json();
-    const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
-
-    res.json({
-      total,
-      limit,
-      offset,
-      registros: Array.isArray(data) ? data : []
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
 
 app.get("/dlh/pendentes", async (req, res) => {
   try {
