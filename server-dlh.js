@@ -374,28 +374,50 @@ async function extrairTabelaDLH(buffer) {
   const pontosUmidade = [];
   const pontosTemperatura = [];
 
+  let modo = null; // "UMIDADE" | "TEMPERATURA"
+
   for (const linha of linhas) {
+    const t = (linha.texto || "").toUpperCase();
+
+    // Detecta seção
+    if (t.includes("MEDIDOR DE UMIDADE")) {
+      modo = "UMIDADE";
+      continue;
+    }
+    if (t.includes("MEDIDOR DE TEMPERATURA")) {
+      modo = "TEMPERATURA";
+      continue;
+    }
+
     const indicado = numeroNaFaixa(linha, 40, 95);
     const padrao = numeroNaFaixa(linha, 150, 225);
-    const erroUmidade = numeroNaFaixa(linha, 250, 315);
-    const erroTemperatura = numeroNaFaixa(linha, 330, 390);
     const incerteza = numeroNaFaixa(linha, 400, 455);
 
-    if (indicado && padrao && erroUmidade && incerteza) {
-      const indicadoNum = parseBR(indicado.text);
-      const padraoNum = parseBR(padrao.text);
-      const erroNum = parseBR(erroUmidade.text);
-      const incertezaNum = parseBR(incerteza.text);
+    if (!indicado || !padrao || !incerteza) continue;
 
-      if (
-        !Number.isNaN(indicadoNum) &&
-        !Number.isNaN(padraoNum) &&
-        !Number.isNaN(erroNum) &&
-        !Number.isNaN(incertezaNum) &&
-        padraoNum >= 0 &&
-        padraoNum <= 100 &&
-        pontosUmidade.length < 3
-      ) {
+    const indicadoNum = parseBR(indicado.text);
+    const padraoNum = parseBR(padrao.text);
+    const incertezaNum = parseBR(incerteza.text);
+
+    if (
+      Number.isNaN(indicadoNum) ||
+      Number.isNaN(padraoNum) ||
+      Number.isNaN(incertezaNum)
+    ) {
+      continue;
+    }
+
+    // =========================
+    // UMIDADE
+    // =========================
+    if (modo === "UMIDADE") {
+      const erroUmidade = numeroNaFaixa(linha, 250, 315);
+      if (!erroUmidade) continue;
+
+      const erroNum = parseBR(erroUmidade.text);
+      if (Number.isNaN(erroNum)) continue;
+
+      if (padraoNum >= 0 && padraoNum <= 100 && pontosUmidade.length < 3) {
         pontosUmidade.push({
           ponto: pontosUmidade.length + 1,
           indicado: fmt2(indicadoNum),
@@ -407,21 +429,17 @@ async function extrairTabelaDLH(buffer) {
       }
     }
 
-    if (indicado && padrao && erroTemperatura && incerteza) {
-      const indicadoNum = parseBR(indicado.text);
-      const padraoNum = parseBR(padrao.text);
-      const erroNum = parseBR(erroTemperatura.text);
-      const incertezaNum = parseBR(incerteza.text);
+    // =========================
+    // TEMPERATURA
+    // =========================
+    if (modo === "TEMPERATURA") {
+      const erroTemperatura = numeroNaFaixa(linha, 330, 390);
+      if (!erroTemperatura) continue;
 
-      if (
-        !Number.isNaN(indicadoNum) &&
-        !Number.isNaN(padraoNum) &&
-        !Number.isNaN(erroNum) &&
-        !Number.isNaN(incertezaNum) &&
-        padraoNum >= -30 &&
-        padraoNum <= 70 &&
-        pontosTemperatura.length < 4
-      ) {
+      const erroNum = parseBR(erroTemperatura.text);
+      if (Number.isNaN(erroNum)) continue;
+
+      if (padraoNum >= -30 && padraoNum <= 70 && pontosTemperatura.length < 4) {
         pontosTemperatura.push({
           ponto: pontosTemperatura.length + 1,
           indicado: fmt2(indicadoNum),
@@ -434,42 +452,20 @@ async function extrairTabelaDLH(buffer) {
     }
   }
 
-  const umidadeUnica = [];
-  const temperaturaUnica = [];
-
-  for (const p of pontosUmidade) {
-    if (!umidadeUnica.some(x => x.padrao === p.padrao)) {
-      umidadeUnica.push({ ...p, ponto: umidadeUnica.length + 1 });
-    }
-  }
-
-  for (const p of pontosTemperatura) {
-    if (!temperaturaUnica.some(x => x.padrao === p.padrao)) {
-      temperaturaUnica.push({ ...p, ponto: temperaturaUnica.length + 1 });
-    }
-  }
-
-  if (umidadeUnica.length < 3 || temperaturaUnica.length < 4) {
+  if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
     return {
       ok: false,
-      pontos_umidade: umidadeUnica,
-      pontos_temperatura: temperaturaUnica,
-      debug: {
-        motivo: "Quantidade insuficiente de pontos DLH",
-        umidade_encontrada: umidadeUnica.length,
-        temperatura_encontrada: temperaturaUnica.length,
-        linhas: linhas.map(l => l.texto)
-      }
+      pontos_umidade: pontosUmidade,
+      pontos_temperatura: pontosTemperatura
     };
   }
 
   return {
     ok: true,
-    pontos_umidade: umidadeUnica.slice(0, 3),
-    pontos_temperatura: temperaturaUnica.slice(0, 4)
+    pontos_umidade: pontosUmidade.slice(0, 3),
+    pontos_temperatura: pontosTemperatura.slice(0, 4)
   };
 }
-
 // =========================
 // PROCESSAMENTO
 // =========================
