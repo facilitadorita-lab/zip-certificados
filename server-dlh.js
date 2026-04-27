@@ -209,7 +209,6 @@ function numeroNaFaixa(linha, xMin, xMax) {
   candidatos.sort((a, b) => a.x - b.x);
   return candidatos[0];
 }
-
 // =========================
 // DRIVE
 // =========================
@@ -223,7 +222,9 @@ async function buscarArquivosDriveDLH() {
         q: `'${FOLDER_ID_DLH}' in parents and mimeType='application/pdf' and trashed=false`,
         fields: "nextPageToken, files(id, name, mimeType)",
         pageSize: 1000,
-        pageToken: pageToken || undefined
+        pageToken: pageToken || undefined,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
       });
 
       arquivos.push(...(response.data.files || []));
@@ -243,6 +244,8 @@ async function buscarArquivosDriveDLH() {
       `&key=${GOOGLE_API_KEY}` +
       `&fields=nextPageToken,files(id,name,mimeType)` +
       `&pageSize=1000` +
+      `&supportsAllDrives=true` +
+      `&includeItemsFromAllDrives=true` +
       `${pageToken ? `&pageToken=${pageToken}` : ""}`;
 
     const res = await fetch(url);
@@ -262,14 +265,21 @@ async function buscarArquivosDriveDLH() {
 async function baixarArquivoDrive(fileId) {
   if (drive) {
     const response = await drive.files.get(
-      { fileId, alt: "media" },
-      { responseType: "arraybuffer" }
+      {
+        fileId,
+        alt: "media",
+        supportsAllDrives: true
+      },
+      {
+        responseType: "arraybuffer"
+      }
     );
 
     return Buffer.from(response.data);
   }
 
-  const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}&supportsAllDrives=true`;
+
   const res = await fetch(url);
 
   if (!res.ok) {
@@ -278,7 +288,6 @@ async function baixarArquivoDrive(fileId) {
 
   return Buffer.from(await res.arrayBuffer());
 }
-
 // =========================
 // PDF
 // =========================
