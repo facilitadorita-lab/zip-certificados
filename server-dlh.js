@@ -377,9 +377,9 @@ async function extrairTabelaDLH(buffer) {
   for (const linha of linhas) {
     const indicado = numeroNaFaixa(linha, 40, 95);
     const padrao = numeroNaFaixa(linha, 150, 225);
-    const erroUmidade = numeroNaFaixa(linha, 250, 320);
-    const erroTemperatura = numeroNaFaixa(linha, 300, 365);
-    const incerteza = numeroNaFaixa(linha, 380, 455);
+    const erroUmidade = numeroNaFaixa(linha, 250, 315);
+    const erroTemperatura = numeroNaFaixa(linha, 330, 390);
+    const incerteza = numeroNaFaixa(linha, 400, 455);
 
     if (indicado && padrao && erroUmidade && incerteza) {
       const indicadoNum = parseBR(indicado.text);
