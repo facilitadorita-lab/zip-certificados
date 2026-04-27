@@ -1,20 +1,15 @@
 {
   "name": "dlh-backend",
   "version": "1.0.0",
-  "description": "Servidor DLH - leitura automática de certificados de calibração (umidade + temperatura)",
-  "main": "server-dlh.js",
   "type": "module",
+  "main": "server-dlh.js",
   "scripts": {
-    "start": "node server-dlh.js",
-    "dev": "nodemon server-dlh.js"
+    "start": "node server-dlh.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
-    "pdfjs-dist": "^4.0.379",
-    "googleapis": "^134.0.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+    "googleapis": "^134.0.0",
+    "pdfjs-dist": "^4.0.379"
   }
 }
