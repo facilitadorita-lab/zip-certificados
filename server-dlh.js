@@ -310,51 +310,53 @@ async function extrairTextoELinhasDoPDF(buffer) {
   return { texto, items, linhas };
 }
 
-function extrairMetadadosDLH(texto, nomeOriginal = "") {
+function extrairMetadadosDLH(texto) {
   let dlh = "";
   let serie = "";
   let data = "";
   let certificado = "";
 
-  let m = String(texto).match(/(\d{6,10})\s+DLH-(\d{4})/i);
+  const textoStr = String(texto || "");
 
+  let m = textoStr.match(/Número de Série:\s*(\d{6,10})/i);
   if (m) {
     serie = m[1];
-    dlh = `DLH-${m[2]}`;
   }
 
-  if (!dlh || !serie) {
-    m = String(texto).match(/DLH-(\d{4})\s+(\d{6,10})/i);
-
+  if (!serie) {
+    m = textoStr.match(/(\d{6,10})\s+DLH[-\s]?(\d{4})/i);
     if (m) {
-      dlh = `DLH-${m[1]}`;
-      serie = m[2];
+      serie = m[1];
+      dlh = `DLH-${m[2]}`;
     }
   }
 
-  let dataMatch = null;
-  const idx = String(texto).search(/Data da Calibração/i);
-
-  if (idx >= 0) {
-    const trecho = String(texto).slice(idx, idx + 500);
-    dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
+  if (!dlh) {
+    m = textoStr.match(/DLH[-\s]?(\d{4})/i);
+    if (m) {
+      dlh = `DLH-${m[1]}`;
+    }
   }
 
-  if (!dataMatch) {
-    dataMatch = String(texto).match(/(\d{2}\/\d{2}\/\d{4})/);
+  const idxData = textoStr.search(/Data da Calibração/i);
+
+  if (idxData >= 0) {
+    const trecho = textoStr.slice(idxData, idxData + 500);
+    const dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
+
+    if (dataMatch) {
+      data = formatarDataBRparaISO(dataMatch[1]);
+    }
   }
 
-  if (dataMatch) {
-    data = formatarDataBRparaISO(dataMatch[1]);
+  if (!data) {
+    const dataMatch = textoStr.match(/(\d{2}\/\d{2}\/\d{4})/);
+    if (dataMatch) {
+      data = formatarDataBRparaISO(dataMatch[1]);
+    }
   }
 
-  certificado = extrairNumeroCertificado(texto);
-
-  const dadosNome = extrairDadosNomeArquivo(nomeOriginal);
-
-  if (!dlh && dadosNome.dlh) dlh = dadosNome.dlh;
-  if (!serie && dadosNome.serie) serie = dadosNome.serie;
-  if (!data && dadosNome.data) data = dadosNome.data;
+  certificado = extrairNumeroCertificado(textoStr);
 
   return {
     dlh: dlh ? soDigitos(dlh).padStart(4, "0") : "",
@@ -363,7 +365,6 @@ function extrairMetadadosDLH(texto, nomeOriginal = "") {
     certificado: certificado || ""
   };
 }
-
 // =========================
 // EXTRAÇÃO TABELA DLH
 // =========================
@@ -477,7 +478,7 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
     const buffer = await baixarArquivoDrive(fileId);
     const { texto } = await extrairTextoELinhasDoPDF(buffer);
 
-    const meta = extrairMetadadosDLH(texto, nomeArquivo);
+    const meta = extrairMetadadosDLH(texto);
     const tabela = await extrairTabelaDLH(buffer);
 
     if (!tabela.ok) {
@@ -604,7 +605,7 @@ async function executarSyncDLH() {
 
     try {
       const proc = await processarPDFDLH(f.id, f.name);
-      const meta = proc.meta || extrairDadosNomeArquivo(f.name);
+      const meta = proc.meta || {};
 
       if (!meta.dlh || !meta.serie || !meta.data) {
         erros.push({
