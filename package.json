@@ -1,21 +1,22 @@
 {
   "name": "zip-certificados",
-  "version": "1.0.0",
-  "description": "API de leitura de certificados",
+  "version": "2.0.0",
+  "description": "API de leitura e processamento de certificados DLT",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium"
+    "dev": "node --watch server.js",
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium --with-deps"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
-    "pdfjs-dist": "^4.5.136",
+    "express": "^4.21.2",
     "googleapis": "^144.0.0",
-    "playwright": "^1.49.1"
+    "node-fetch": "^3.3.2",
+    "pdfjs-dist": "^4.10.38",
+    "playwright": "^1.52.0"
   }
 }
