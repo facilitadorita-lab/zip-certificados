@@ -17,6 +17,7 @@
     "googleapis": "^144.0.0",
     "node-fetch": "^3.3.2",
     "pdfjs-dist": "^4.10.38",
-    "playwright": "^1.52.0"
+    "playwright": "^1.52.0",
+    "exceljs": "^4.4.0"
   }
 }
