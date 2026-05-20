@@ -7,6 +7,7 @@ import { google } from "googleapis";
 import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
 import fetch from "node-fetch";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import ExcelJS from "exceljs";
 
 const app = express();
 app.use(express.json());
@@ -1535,6 +1536,322 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
       await browser.close();
     }
     res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/relatorio-dia/excel", async (req, res) => {
+  try {
+    const dataRelatorio = req.query.data || obterHojeISO();
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      {
+        headers: supabaseHeaders()
+      }
+    );
+
+    const todos = await r.json();
+
+    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
+      mesmaData(item.criado_em, dataRelatorio)
+    );
+
+    const workbook = new ExcelJS.Workbook();
+
+    workbook.creator = "ITA FRIA";
+    workbook.lastModifiedBy = "Sistema";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const sheet = workbook.addWorksheet("Relatório DLT");
+
+    sheet.pageSetup = {
+      paperSize: 9,
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      horizontalCentered: true,
+      verticalCentered: false,
+      margins: {
+        left: 0.2,
+        right: 0.2,
+        top: 0.3,
+        bottom: 0.3,
+        header: 0.1,
+        footer: 0.1
+      }
+    };
+
+    sheet.properties.defaultRowHeight = 20;
+
+    // =========================
+    // CABEÇALHO
+    // =========================
+
+    sheet.mergeCells("A1:C3");
+
+    sheet.getCell("A1").value =
+`REL 06GQ09
+Versão: 00
+Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+
+    sheet.getCell("A1").alignment = {
+      vertical: "middle",
+      horizontal: "left",
+      wrapText: true
+    };
+
+    sheet.getCell("A1").font = {
+      bold: true,
+      size: 9,
+      name: "Arial"
+    };
+
+    sheet.mergeCells("D1:O3");
+
+    sheet.getCell("D1").value =
+"AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T";
+
+    sheet.getCell("D1").alignment = {
+      vertical: "middle",
+      horizontal: "center"
+    };
+
+    sheet.getCell("D1").font = {
+      bold: true,
+      size: 14,
+      name: "Arial"
+    };
+
+    // =========================
+    // BLOCO INSTRUMENTO
+    // =========================
+
+    sheet.mergeCells("A4:C4");
+    sheet.getCell("A4").value = "INSTRUMENTO";
+
+    sheet.mergeCells("D4:O4");
+    sheet.getCell("D4").value =
+"ESPECIFICAÇÕES TEMPERATURA / CRITÉRIOS DE ACEITAÇÃO";
+
+    ["A4", "D4"].forEach(c => {
+      sheet.getCell(c).font = {
+        bold: true,
+        size: 10,
+        name: "Arial"
+      };
+
+      sheet.getCell(c).alignment = {
+        horizontal: "center",
+        vertical: "middle"
+      };
+
+      sheet.getCell(c).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "D9D9D9" }
+      };
+    });
+
+    sheet.getCell("A5").value = "Marca: TESTO";
+    sheet.getCell("B5").value = "Modelo: 174T";
+    sheet.getCell("C5").value = "Resolução: 0,1";
+    sheet.getCell("D5").value = "DMA: 0,5";
+    sheet.getCell("E5").value = "Unidade: °C";
+
+    // =========================
+    // CABEÇALHO TABELA
+    // =========================
+
+    const headerRow = 7;
+
+    sheet.getRow(headerRow).values = [
+      "N° Série",
+      "TAG",
+      "Calibrado em",
+      "Validade",
+      "Certificado",
+      "Incerteza",
+      "-20°C Erro",
+      "-20°C Resultado",
+      "0°C Erro",
+      "0°C Resultado",
+      "15°C Erro",
+      "15°C Resultado",
+      "60°C Erro",
+      "60°C Resultado",
+      "RESULTADO"
+    ];
+
+    sheet.getRow(headerRow).height = 35;
+
+    sheet.getRow(headerRow).font = {
+      bold: true,
+      size: 9,
+      name: "Arial"
+    };
+
+    sheet.getRow(headerRow).alignment = {
+      horizontal: "center",
+      vertical: "middle",
+      wrapText: true
+    };
+
+    sheet.getRow(headerRow).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "BFBFBF" }
+    };
+
+    // =========================
+    // DADOS
+    // =========================
+
+    dados.forEach(c => {
+      const pontos = Array.isArray(c.pontos) ? c.pontos : [];
+
+      const p1 = pontos[0] || {};
+      const p2 = pontos[1] || {};
+      const p3 = pontos[2] || {};
+      const p4 = pontos[3] || {};
+
+      const row = sheet.addRow([
+        c.serie || "",
+        normalizarDLT(c.dlt) || "",
+        formatarDataISOParaBR(c.data),
+        c.mes_ano_validade || "",
+        c.certificado || "",
+        p1.incerteza ?? "",
+        p1.erro ?? "",
+        p1.soma ?? "",
+        p2.erro ?? "",
+        p2.soma ?? "",
+        p3.erro ?? "",
+        p3.soma ?? "",
+        p4.erro ?? "",
+        p4.soma ?? "",
+        c.status || ""
+      ]);
+
+      row.height = 22;
+
+      if (String(c.status || "").toUpperCase() === "APROVADO") {
+        row.getCell(15).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "C6EFCE" }
+        };
+      }
+
+      if (String(c.status || "").toUpperCase() === "REPROVADO") {
+        row.getCell(15).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFC7CE" }
+        };
+      }
+    });
+
+    // =========================
+    // LARGURA COLUNAS
+    // =========================
+
+    const larguras = [
+      16,
+      14,
+      16,
+      16,
+      18,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      14
+    ];
+
+    larguras.forEach((w, i) => {
+      sheet.getColumn(i + 1).width = w;
+    });
+
+    // =========================
+    // ESTILO GERAL
+    // =========================
+
+    sheet.eachRow((row, rowNumber) => {
+      row.eachCell(cell => {
+        cell.border = {
+          top: { style: "thin" },
+          left: { style: "thin" },
+          bottom: { style: "thin" },
+          right: { style: "thin" }
+        };
+
+        cell.alignment = {
+          horizontal: "center",
+          vertical: "middle",
+          wrapText: true
+        };
+
+        if (rowNumber > headerRow) {
+          cell.font = {
+            name: "Arial",
+            size: 8
+          };
+        }
+      });
+    });
+
+    // =========================
+    // CONGELAR CABEÇALHO
+    // =========================
+
+    sheet.views = [
+      {
+        state: "frozen",
+        ySplit: 7
+      }
+    ];
+
+    // =========================
+    // RODAPÉ
+    // =========================
+
+    sheet.headerFooter.oddFooter =
+"&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
+
+    // =========================
+    // NOME ARQUIVO
+    // =========================
+
+    const nomeArquivo =
+`RELATORIO_DIARIO_174T_${dataRelatorio}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${nomeArquivo}"`
+    );
+
+    await workbook.xlsx.write(res);
+
+    return res.end();
+
+  } catch (e) {
+    console.error(e);
+
+    return res.status(500).json({
+      erro: e.message
+    });
   }
 });
 
