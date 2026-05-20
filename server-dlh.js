@@ -2,6 +2,7 @@ import express from "express";
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import ExcelJS from "exceljs";
 import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
 
 const app = express();
@@ -499,6 +500,12 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
     const { texto } = await extrairTextoELinhasDoPDF(buffer);
 
     const meta = extrairMetadadosDLH(texto);
+    const fallbackNome = extrairDadosNomeArquivo(nomeArquivo);
+
+    if (!meta.dlh && fallbackNome.dlh) meta.dlh = soDigitos(fallbackNome.dlh).padStart(4, "0");
+    if (!meta.serie && fallbackNome.serie) meta.serie = fallbackNome.serie;
+    if (!meta.data && fallbackNome.data) meta.data = fallbackNome.data;
+
     const tabela = await extrairTabelaDLH(buffer);
 
     if (!tabela.ok) {
@@ -802,6 +809,7 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
     erros
   };
 }
+
 // =========================
 // ROTAS
 // =========================
@@ -1118,6 +1126,269 @@ app.get("/dlh/relatorio-dia/dados", async (req, res) => {
       total: dados.length,
       registros: dados
     });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/relatorio-dia/excel", async (req, res) => {
+  try {
+    const dataRelatorio = req.query.data || obterHojeISO();
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const todos = await r.json();
+    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
+      mesmaData(item.criado_em, dataRelatorio)
+    );
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "ITA FRIA";
+    workbook.lastModifiedBy = "Sistema";
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const sheet = workbook.addWorksheet("Relatório DLH");
+
+    sheet.pageSetup = {
+      paperSize: 9,
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      horizontalCentered: true,
+      verticalCentered: false,
+      margins: {
+        left: 0.2,
+        right: 0.2,
+        top: 0.3,
+        bottom: 0.3,
+        header: 0.1,
+        footer: 0.1
+      }
+    };
+
+    sheet.properties.defaultRowHeight = 20;
+
+    sheet.mergeCells("A1:C3");
+    sheet.getCell("A1").value =
+`REL 06GQ09
+Versão: 00
+Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+
+    sheet.getCell("A1").alignment = {
+      vertical: "middle",
+      horizontal: "left",
+      wrapText: true
+    };
+    sheet.getCell("A1").font = { bold: true, size: 9, name: "Arial" };
+
+    sheet.mergeCells("D1:X3");
+    sheet.getCell("D1").value =
+      "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174H / DLH";
+    sheet.getCell("D1").alignment = {
+      vertical: "middle",
+      horizontal: "center"
+    };
+    sheet.getCell("D1").font = { bold: true, size: 14, name: "Arial" };
+
+    sheet.mergeCells("A4:C4");
+    sheet.getCell("A4").value = "INSTRUMENTO";
+
+    sheet.mergeCells("D4:X4");
+    sheet.getCell("D4").value =
+      "ESPECIFICAÇÕES UMIDADE / TEMPERATURA / CRITÉRIOS DE ACEITAÇÃO";
+
+    ["A4", "D4"].forEach(c => {
+      sheet.getCell(c).font = { bold: true, size: 10, name: "Arial" };
+      sheet.getCell(c).alignment = { horizontal: "center", vertical: "middle" };
+      sheet.getCell(c).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "D9D9D9" }
+      };
+    });
+
+    sheet.getCell("A5").value = "Marca: TESTO";
+    sheet.getCell("B5").value = "Modelo: 174H";
+    sheet.getCell("C5").value = "Tipo: Termohigrômetro";
+    sheet.getCell("D5").value = "Unidade: %u.r. / °C";
+    sheet.getCell("E5").value = "Critério: Erro + Incerteza";
+
+    const headerRow = 7;
+
+    sheet.getRow(headerRow).values = [
+      "N° Série",
+      "TAG",
+      "Calibrado em",
+      "Validade",
+      "Certificado",
+      "10% UR Erro",
+      "10% UR Inc.",
+      "10% UR Resultado",
+      "50% UR Erro",
+      "50% UR Inc.",
+      "50% UR Resultado",
+      "90% UR Erro",
+      "90% UR Inc.",
+      "90% UR Resultado",
+      "-20°C Erro",
+      "-20°C Inc.",
+      "-20°C Resultado",
+      "0°C Erro",
+      "0°C Inc.",
+      "0°C Resultado",
+      "15°C Erro",
+      "15°C Inc.",
+      "15°C Resultado",
+      "60°C Erro",
+      "60°C Inc.",
+      "60°C Resultado",
+      "RESULTADO"
+    ];
+
+    sheet.getRow(headerRow).height = 35;
+    sheet.getRow(headerRow).font = { bold: true, size: 8, name: "Arial" };
+    sheet.getRow(headerRow).alignment = {
+      horizontal: "center",
+      vertical: "middle",
+      wrapText: true
+    };
+    sheet.getRow(headerRow).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "BFBFBF" }
+    };
+
+    dados.forEach(c => {
+      const u = Array.isArray(c.pontos_umidade) ? c.pontos_umidade : [];
+      const t = Array.isArray(c.pontos_temperatura) ? c.pontos_temperatura : [];
+
+      const u1 = u[0] || {};
+      const u2 = u[1] || {};
+      const u3 = u[2] || {};
+
+      const t1 = t[0] || {};
+      const t2 = t[1] || {};
+      const t3 = t[2] || {};
+      const t4 = t[3] || {};
+
+      const row = sheet.addRow([
+        c.serie || "",
+        normalizarDLH(c.dlh) || c.dlh || "",
+        formatarDataISOParaBR(c.data),
+        c.mes_ano_validade || "",
+        c.certificado || "",
+        u1.erro ?? "",
+        u1.incerteza ?? "",
+        u1.soma ?? "",
+        u2.erro ?? "",
+        u2.incerteza ?? "",
+        u2.soma ?? "",
+        u3.erro ?? "",
+        u3.incerteza ?? "",
+        u3.soma ?? "",
+        t1.erro ?? "",
+        t1.incerteza ?? "",
+        t1.soma ?? "",
+        t2.erro ?? "",
+        t2.incerteza ?? "",
+        t2.soma ?? "",
+        t3.erro ?? "",
+        t3.incerteza ?? "",
+        t3.soma ?? "",
+        t4.erro ?? "",
+        t4.incerteza ?? "",
+        t4.soma ?? "",
+        c.status || ""
+      ]);
+
+      row.height = 22;
+
+      if (String(c.status || "").toUpperCase() === "APROVADO") {
+        row.getCell(27).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "C6EFCE" }
+        };
+      }
+
+      if (String(c.status || "").toUpperCase() === "REPROVADO") {
+        row.getCell(27).fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFC7CE" }
+        };
+      }
+    });
+
+    const larguras = [
+      15, 13, 14, 13, 17,
+      11, 11, 12,
+      11, 11, 12,
+      11, 11, 12,
+      11, 11, 12,
+      11, 11, 12,
+      11, 11, 12,
+      11, 11, 12,
+      14
+    ];
+
+    larguras.forEach((w, i) => {
+      sheet.getColumn(i + 1).width = w;
+    });
+
+    sheet.eachRow((row, rowNumber) => {
+      row.eachCell(cell => {
+        cell.border = {
+          top: { style: "thin" },
+          left: { style: "thin" },
+          bottom: { style: "thin" },
+          right: { style: "thin" }
+        };
+
+        cell.alignment = {
+          horizontal: "center",
+          vertical: "middle",
+          wrapText: true
+        };
+
+        if (rowNumber > headerRow) {
+          cell.font = {
+            name: "Arial",
+            size: 8
+          };
+        }
+      });
+    });
+
+    sheet.views = [
+      {
+        state: "frozen",
+        ySplit: 7
+      }
+    ];
+
+    sheet.headerFooter.oddFooter =
+      "&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
+
+    const nomeArquivo = `RELATORIO_DIARIO_DLH_${dataRelatorio}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${nomeArquivo}"`
+    );
+
+    await workbook.xlsx.write(res);
+    return res.end();
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
