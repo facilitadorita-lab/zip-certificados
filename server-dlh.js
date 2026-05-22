@@ -24,6 +24,8 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
+
+
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -390,24 +392,40 @@ async function extrairTabelaDLH(buffer) {
   const pontosUmidade = [];
   const pontosTemperatura = [];
 
-  for (const linha of linhas) {
-    const nums = numerosDaLinha(linha);
-    if (nums.length < 4) continue;
+  const padroesUmidade = [10, 50, 90];
+  const padroesTemperatura = [-20, 0, 15, 60];
 
+  let lendoUmidade = false;
+  let lendoTemperatura = false;
+
+  for (const linha of linhas) {
+    const texto = String(linha.texto || "");
+
+    if (/Teste\s*\(%u\.?r\.?\)/i.test(texto)) {
+      lendoUmidade = true;
+      lendoTemperatura = false;
+      continue;
+    }
+
+    if (/Teste\s*\(ºC\)|Teste\s*\(°C\)/i.test(texto)) {
+      lendoUmidade = false;
+      lendoTemperatura = true;
+      continue;
+    }
+
+    if (/Observações|A incerteza|Data da Calibração/i.test(texto)) {
+      lendoUmidade = false;
+      lendoTemperatura = false;
+    }
+
+    const nums = numerosDaLinha(linha);
     const valores = nums.map(n => n.valor);
 
-    if (
-      pontosUmidade.length < 3 &&
-      nums.length >= 4 &&
-      valores[1] >= 0 &&
-      valores[1] <= 100 &&
-      Math.abs(valores[2]) <= 10 &&
-      Math.abs(valores[3]) <= 5
-    ) {
+    if (lendoUmidade && pontosUmidade.length < 3 && valores.length >= 3) {
       const indicadoNum = valores[0];
-      const padraoNum = valores[1];
-      const erroNum = valores[2];
-      const incertezaNum = valores[3];
+      const erroNum = valores[1];
+      const incertezaNum = valores[2];
+      const padraoNum = padroesUmidade[pontosUmidade.length];
 
       pontosUmidade.push({
         ponto: pontosUmidade.length + 1,
@@ -421,19 +439,11 @@ async function extrairTabelaDLH(buffer) {
       continue;
     }
 
-    if (
-      pontosTemperatura.length < 4 &&
-      nums.length >= 4 &&
-      valores[1] >= -30 &&
-      valores[1] <= 70 &&
-      Math.abs(valores[2]) <= 5 &&
-      Math.abs(valores[3]) <= 5 &&
-      !(valores[1] >= 0 && valores[1] <= 100 && nums.length >= 5 && valores[3] >= 10 && valores[3] <= 30)
-    ) {
+    if (lendoTemperatura && pontosTemperatura.length < 4 && valores.length >= 2) {
       const indicadoNum = valores[0];
-      const padraoNum = valores[1];
-      const erroNum = valores[2];
-      const incertezaNum = valores[3];
+      const padraoNum = padroesTemperatura[pontosTemperatura.length];
+      const erroNum = fmt2(indicadoNum - padraoNum);
+      const incertezaNum = valores[1];
 
       pontosTemperatura.push({
         ponto: pontosTemperatura.length + 1,
@@ -443,41 +453,20 @@ async function extrairTabelaDLH(buffer) {
         incerteza: fmt2(Math.abs(incertezaNum)),
         soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
       });
+
+      continue;
     }
   }
 
-  const umidadeUnica = [];
-  const temperaturaUnica = [];
-
-  for (const p of pontosUmidade) {
-    if (!umidadeUnica.some(x => x.padrao === p.padrao)) {
-      umidadeUnica.push({ ...p, ponto: umidadeUnica.length + 1 });
-    }
-  }
-
-  for (const p of pontosTemperatura) {
-    if (!temperaturaUnica.some(x => x.padrao === p.padrao)) {
-      temperaturaUnica.push({ ...p, ponto: temperaturaUnica.length + 1 });
-    }
-  }
-
-  const pontosTemperaturaOrdenados = temperaturaUnica
-    .sort((a, b) => a.padrao - b.padrao)
-    .map((p, index) => ({ ...p, ponto: index + 1 }));
-
-  const pontosUmidadeOrdenados = umidadeUnica
-    .sort((a, b) => a.padrao - b.padrao)
-    .map((p, index) => ({ ...p, ponto: index + 1 }));
-
-  if (pontosUmidadeOrdenados.length < 3 || pontosTemperaturaOrdenados.length < 4) {
+  if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
     return {
       ok: false,
-      pontos_umidade: pontosUmidadeOrdenados,
-      pontos_temperatura: pontosTemperaturaOrdenados,
+      pontos_umidade: pontosUmidade,
+      pontos_temperatura: pontosTemperatura,
       debug: {
         motivo: "Quantidade insuficiente de pontos DLH",
-        umidade_encontrada: pontosUmidadeOrdenados.length,
-        temperatura_encontrada: pontosTemperaturaOrdenados.length,
+        umidade_encontrada: pontosUmidade.length,
+        temperatura_encontrada: pontosTemperatura.length,
         linhas: linhas.map(l => l.texto)
       }
     };
@@ -485,8 +474,8 @@ async function extrairTabelaDLH(buffer) {
 
   return {
     ok: true,
-    pontos_umidade: pontosUmidadeOrdenados.slice(0, 3),
-    pontos_temperatura: pontosTemperaturaOrdenados.slice(0, 4)
+    pontos_umidade: pontosUmidade,
+    pontos_temperatura: pontosTemperatura
   };
 }
 
