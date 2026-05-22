@@ -398,17 +398,16 @@ async function extrairTabelaDLH(buffer) {
 
     if (
       pontosUmidade.length < 3 &&
-      nums.length >= 5 &&
+      nums.length >= 4 &&
       valores[1] >= 0 &&
       valores[1] <= 100 &&
-      valores[3] >= 10 &&
-      valores[3] <= 30 &&
-      Math.abs(valores[4]) <= 5
+      Math.abs(valores[2]) <= 10 &&
+      Math.abs(valores[3]) <= 5
     ) {
       const indicadoNum = valores[0];
       const padraoNum = valores[1];
       const erroNum = valores[2];
-      const incertezaNum = valores[4];
+      const incertezaNum = valores[3];
 
       pontosUmidade.push({
         ponto: pontosUmidade.length + 1,
