@@ -12,6 +12,10 @@ app.use(express.json());
 // CONFIG DLH
 // =========================
 
+// =========================
+// CONFIG DLH
+// =========================
+
 const PORT = process.env.PORT || 3001;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://padjfnfysbzaehkqmoyx.supabase.co";
@@ -24,7 +28,6 @@ const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certifi
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
-
 
 
 // =========================
@@ -388,94 +391,77 @@ function extrairMetadadosDLH(texto) {
 // EXTRAÇÃO TABELA DLH
 // =========================
 async function extrairTabelaDLH(buffer) {
-  const { linhas } = await extrairTextoELinhasDoPDF(buffer);
+  const { texto, linhas } = await extrairTextoELinhasDoPDF(buffer);
 
+  const textoCompleto = String(texto || "");
   const pontosUmidade = [];
   const pontosTemperatura = [];
 
   const padroesUmidade = [10, 50, 90];
   const padroesTemperatura = [-20, 0, 15, 60];
 
-  function numerosDoTexto(texto) {
-    return (String(texto || "").match(/-?\d+(?:[,.]\d+)?/g) || [])
+  function extrairNumerosDaLinha(linhaTexto) {
+    return (String(linhaTexto || "").match(/-?\d+(?:[,.]\d+)?/g) || [])
       .map(v => parseBR(v))
       .filter(v => !Number.isNaN(v));
   }
 
-  let modo = "";
+  function linhasValidasDoTrecho(trecho) {
+    return String(trecho || "")
+      .split(/\n+/)
+      .map(l => l.trim())
+      .filter(Boolean);
+  }
 
-  for (const linha of linhas) {
-    const textoOriginal = String(linha.texto || "");
-    const texto = textoOriginal.toUpperCase();
+  // =====================================================
+  // UMIDADE - PADRÃO ESCALA
+  // No texto extraído, o bloco vem assim:
+  //
+  // Instrumento em Erros
+  // Teste (%u.r.) (% u.r.) (%u.r.) Fat.Abrng. k Veff
+  // 14,0 4,0 0,4 2,00 ∞
+  // 51,0 1,0 0,8 2,00 ∞
+  // 86,5 -3,5 1,5 2,00 ∞
+  //
+  // O padrão visual é fixo na tabela:
+  // 10,0 / 50,0 / 90,0
+  //
+  // Portanto:
+  // indicado = primeiro número da linha
+  // erro = segundo número da linha
+  // incerteza = terceiro número da linha
+  // padrão = 10/50/90 por ordem
+  // =====================================================
 
-    // =====================================================
-    // ENTRADA NOS BLOCOS CORRETOS DO CERTIFICADO DLH
-    // Não depende do título "MEDIDOR DE UMIDADE", pois em
-    // alguns PDFs o pdfjs joga esse título fora da ordem visual.
-    // =====================================================
-    if (
-      texto.includes("TESTE (%U.R.)") ||
-      texto.includes("TESTE (% U.R.)") ||
-      texto.includes("TESTE (%UR)") ||
-      texto.includes("TESTE (% U R)") ||
-      (texto.includes("TESTE") && texto.includes("U.R"))
-    ) {
-      modo = "UMIDADE";
-      continue;
-    }
+  const matchUmidade = textoCompleto.match(
+    /Teste\s*\(%\s*u\.?\s*r\.?\)[\s\S]*?(?=Instrumento\s+em\s+Erros\s*\n?\s*Teste\s*\([º°]?\s*C\)|Teste\s*\([º°]?\s*C\)|MEDIDOR\s+DE\s+TEMPERATURA|A incerteza|Observações)/i
+  );
 
-    if (
-      texto.includes("TESTE (ºC)") ||
-      texto.includes("TESTE (°C)") ||
-      texto.includes("TESTE (OC)") ||
-      texto.includes("TESTE (C)") ||
-      (texto.includes("TESTE") && (texto.includes("ºC") || texto.includes("°C")))
-    ) {
-      modo = "TEMPERATURA";
-      continue;
-    }
+  if (matchUmidade) {
+    const linhasUmidade = linhasValidasDoTrecho(matchUmidade[0]);
 
-    if (
-      texto.includes("A INCERTEZA") ||
-      texto.includes("OBSERVAÇÕES") ||
-      texto.includes("DATA DA CALIBRAÇÃO") ||
-      texto.includes("PADRÕES UTILIZADOS") ||
-      texto.includes("CARACTERÍSTICAS DO INSTRUMENTO")
-    ) {
-      modo = "";
-    }
+    for (const linha of linhasUmidade) {
+      if (pontosUmidade.length >= 3) break;
 
-    const valores = numerosDoTexto(textoOriginal);
+      const valores = extrairNumerosDaLinha(linha);
 
-    // =====================================================
-    // UMIDADE
-    // No texto extraído, a linha vem assim:
-    // indicado | erro | incerteza | k
-    //
-    // O padrão visual da tabela é fixo por linha:
-    // 10,0 | 50,0 | 90,0
-    //
-    // Exemplo:
-    // 13,7 3,7 0,4 2,00
-    // vira:
-    // padrão 10,0 | indicado 13,7 | erro 3,7 | inc 0,4
-    // =====================================================
-    if (modo === "UMIDADE" && pontosUmidade.length < 3 && valores.length >= 3) {
-      const padraoNum = padroesUmidade[pontosUmidade.length];
+      // Linhas de resultado de umidade normalmente têm:
+      // indicado, erro, incerteza, k
+      if (valores.length < 3) continue;
+
       const indicadoNum = valores[0];
       const erroNum = valores[1];
       const incertezaNum = valores[2];
+      const padraoNum = padroesUmidade[pontosUmidade.length];
 
       const linhaCompativel =
         indicadoNum >= 0 &&
         indicadoNum <= 100 &&
         Math.abs(erroNum) <= 20 &&
         Math.abs(incertezaNum) <= 10 &&
-        Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.2;
+        Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.5;
 
-      if (!linhaCompativel) {
-        continue;
-      }
+      if (!linhaCompativel) continue;
 
       pontosUmidade.push({
         ponto: pontosUmidade.length + 1,
@@ -485,26 +471,49 @@ async function extrairTabelaDLH(buffer) {
         incerteza: fmt2(Math.abs(incertezaNum)),
         soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
       });
-
-      continue;
     }
+  }
 
-    // =====================================================
-    // TEMPERATURA
-    // No texto extraído, a linha normalmente vem assim:
-    // indicado | incerteza | k
-    //
-    // O padrão visual da tabela é fixo por linha:
-    // -20,0 | 0,0 | 15,0 | 60,0
-    //
-    // O erro é calculado como:
-    // indicado - padrão
-    // =====================================================
-    if (modo === "TEMPERATURA" && pontosTemperatura.length < 4 && valores.length >= 2) {
-      const padraoNum = padroesTemperatura[pontosTemperatura.length];
+  // =====================================================
+  // TEMPERATURA - PADRÃO ESCALA
+  // No texto extraído, o bloco vem assim:
+  //
+  // Instrumento em Erros
+  // Teste (ºC) (ºC) (ºC) Fat.Abrng. k Veff
+  // -19,9 0,2 2,00 ∞
+  // 0,0 0,2 2,00 ∞
+  // 14,9 0,2 2,00 ∞
+  // 59,7 0,2 2,00 ∞
+  //
+  // O padrão visual é fixo na tabela:
+  // -20,0 / 0,0 / 15,0 / 60,0
+  //
+  // Portanto:
+  // indicado = primeiro número da linha
+  // incerteza = segundo número da linha
+  // erro = indicado - padrão
+  // =====================================================
+
+  const matchTemperatura = textoCompleto.match(
+    /Teste\s*\([º°]?\s*C\)[\s\S]*?(?=A incerteza|Observações|Data da Calibração|PADRÕES UTILIZADOS|CARACTERÍSTICAS DO INSTRUMENTO)/i
+  );
+
+  if (matchTemperatura) {
+    const linhasTemperatura = linhasValidasDoTrecho(matchTemperatura[0]);
+
+    for (const linha of linhasTemperatura) {
+      if (pontosTemperatura.length >= 4) break;
+
+      const valores = extrairNumerosDaLinha(linha);
+
+      // Linhas de resultado de temperatura normalmente têm:
+      // indicado, incerteza, k
+      if (valores.length < 2) continue;
+
       const indicadoNum = valores[0];
-      const erroNum = fmt2(indicadoNum - padraoNum);
       const incertezaNum = valores[1];
+      const padraoNum = padroesTemperatura[pontosTemperatura.length];
+      const erroNum = fmt2(indicadoNum - padraoNum);
 
       const linhaCompativel =
         indicadoNum >= -40 &&
@@ -512,9 +521,7 @@ async function extrairTabelaDLH(buffer) {
         Math.abs(erroNum) <= 5 &&
         Math.abs(incertezaNum) <= 5;
 
-      if (!linhaCompativel) {
-        continue;
-      }
+      if (!linhaCompativel) continue;
 
       pontosTemperatura.push({
         ponto: pontosTemperatura.length + 1,
@@ -524,8 +531,89 @@ async function extrairTabelaDLH(buffer) {
         incerteza: fmt2(Math.abs(incertezaNum)),
         soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
       });
+    }
+  }
 
-      continue;
+  // =====================================================
+  // FALLBACK POR LINHAS
+  // Caso algum PDF venha com quebra diferente, percorre as linhas
+  // e usa coerência matemática com os padrões fixos.
+  // =====================================================
+
+  if (pontosUmidade.length < 3) {
+    const candidatos = [];
+
+    for (const linha of linhas) {
+      if (candidatos.length >= 3) break;
+
+      const valores = extrairNumerosDaLinha(linha.texto);
+      if (valores.length < 3) continue;
+
+      const padraoNum = padroesUmidade[candidatos.length];
+      const indicadoNum = valores[0];
+      const erroNum = valores[1];
+      const incertezaNum = valores[2];
+
+      const linhaCompativel =
+        indicadoNum >= 0 &&
+        indicadoNum <= 100 &&
+        Math.abs(erroNum) <= 20 &&
+        Math.abs(incertezaNum) <= 10 &&
+        Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.5;
+
+      if (!linhaCompativel) continue;
+
+      candidatos.push({
+        ponto: candidatos.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
+    }
+
+    if (candidatos.length >= 3) {
+      pontosUmidade.length = 0;
+      pontosUmidade.push(...candidatos.slice(0, 3));
+    }
+  }
+
+  if (pontosTemperatura.length < 4) {
+    const candidatos = [];
+
+    for (const linha of linhas) {
+      if (candidatos.length >= 4) break;
+
+      const valores = extrairNumerosDaLinha(linha.texto);
+      if (valores.length < 2) continue;
+
+      const padraoNum = padroesTemperatura[candidatos.length];
+      const indicadoNum = valores[0];
+      const incertezaNum = valores[1];
+      const erroNum = fmt2(indicadoNum - padraoNum);
+
+      const linhaCompativel =
+        indicadoNum >= -40 &&
+        indicadoNum <= 80 &&
+        Math.abs(erroNum) <= 5 &&
+        Math.abs(incertezaNum) <= 5;
+
+      if (!linhaCompativel) continue;
+
+      candidatos.push({
+        ponto: candidatos.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
+    }
+
+    if (candidatos.length >= 4) {
+      pontosTemperatura.length = 0;
+      pontosTemperatura.push(...candidatos.slice(0, 4));
     }
   }
 
@@ -538,7 +626,8 @@ async function extrairTabelaDLH(buffer) {
         motivo: "Quantidade insuficiente de pontos DLH",
         umidade_encontrada: pontosUmidade.length,
         temperatura_encontrada: pontosTemperatura.length,
-        linhas: linhas.map(l => l.texto)
+        linhas: linhas.map(l => l.texto),
+        texto: textoCompleto
       }
     };
   }
