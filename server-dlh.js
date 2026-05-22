@@ -25,7 +25,6 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
 
-
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -392,28 +391,25 @@ async function extrairTabelaDLH(buffer) {
   const pontosUmidade = [];
   const pontosTemperatura = [];
 
-  const padroesUmidade = [10, 50, 90];
-  const padroesTemperatura = [-20, 0, 15, 60];
-
   let lendoUmidade = false;
   let lendoTemperatura = false;
 
   for (const linha of linhas) {
     const texto = String(linha.texto || "");
 
-    if (/Teste\s*\(%u\.?r\.?\)/i.test(texto)) {
+    if (/MEDIDOR DE UMIDADE/i.test(texto)) {
       lendoUmidade = true;
       lendoTemperatura = false;
       continue;
     }
 
-    if (/Teste\s*\(ºC\)|Teste\s*\(°C\)/i.test(texto)) {
+    if (/MEDIDOR DE TEMPERATURA/i.test(texto)) {
       lendoUmidade = false;
       lendoTemperatura = true;
       continue;
     }
 
-    if (/Observações|A incerteza|Data da Calibração/i.test(texto)) {
+    if (/Observações|Data da Calibração|A incerteza/i.test(texto)) {
       lendoUmidade = false;
       lendoTemperatura = false;
     }
@@ -421,11 +417,18 @@ async function extrairTabelaDLH(buffer) {
     const nums = numerosDaLinha(linha);
     const valores = nums.map(n => n.valor);
 
-    if (lendoUmidade && pontosUmidade.length < 3 && valores.length >= 3) {
+    // =========================
+    // UMIDADE
+    // Linha correta:
+    // Indicado | Padrão | Erro | Temperatura Ref. | Incerteza | k | Veff
+    // =========================
+    if (lendoUmidade && pontosUmidade.length < 3 && valores.length >= 5) {
       const indicadoNum = valores[0];
-      const erroNum = valores[1];
-      const incertezaNum = valores[2];
-      const padraoNum = padroesUmidade[pontosUmidade.length];
+      const padraoNum = valores[1];
+      const erroNum = valores[2];
+      const incertezaNum = valores[4];
+
+      if (![10, 50, 90].includes(Math.round(padraoNum))) continue;
 
       pontosUmidade.push({
         ponto: pontosUmidade.length + 1,
@@ -439,11 +442,18 @@ async function extrairTabelaDLH(buffer) {
       continue;
     }
 
-    if (lendoTemperatura && pontosTemperatura.length < 4 && valores.length >= 2) {
+    // =========================
+    // TEMPERATURA
+    // Linha correta:
+    // Indicado | Padrão | Erro | Incerteza | k | Veff
+    // =========================
+    if (lendoTemperatura && pontosTemperatura.length < 4 && valores.length >= 4) {
       const indicadoNum = valores[0];
-      const padraoNum = padroesTemperatura[pontosTemperatura.length];
-      const erroNum = fmt2(indicadoNum - padraoNum);
-      const incertezaNum = valores[1];
+      const padraoNum = valores[1];
+      const erroNum = valores[2];
+      const incertezaNum = valores[3];
+
+      if (![-20, 0, 15, 60].includes(Math.round(padraoNum))) continue;
 
       pontosTemperatura.push({
         ponto: pontosTemperatura.length + 1,
