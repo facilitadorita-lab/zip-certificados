@@ -25,6 +25,7 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
 
+
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -397,13 +398,19 @@ async function extrairTabelaDLH(buffer) {
   for (const linha of linhas) {
     const texto = String(linha.texto || "");
 
-    if (/MEDIDOR DE UMIDADE/i.test(texto)) {
+    if (
+      /MEDIDOR/i.test(texto) &&
+      /UMIDADE/i.test(texto)
+    ) {
       lendoUmidade = true;
       lendoTemperatura = false;
       continue;
     }
 
-    if (/MEDIDOR DE TEMPERATURA/i.test(texto)) {
+    if (
+      /MEDIDOR/i.test(texto) &&
+      /TEMPERATURA/i.test(texto)
+    ) {
       lendoUmidade = false;
       lendoTemperatura = true;
       continue;
@@ -421,6 +428,7 @@ async function extrairTabelaDLH(buffer) {
     // UMIDADE
     // Linha correta:
     // Indicado | Padrão | Erro | Temperatura Ref. | Incerteza | k | Veff
+    // Exemplo: 14,0 | 10,0 | 4,0 | 20 | 0,4 | 2,00 | ∞
     // =========================
     if (lendoUmidade && pontosUmidade.length < 3 && valores.length >= 5) {
       const indicadoNum = valores[0];
@@ -446,6 +454,7 @@ async function extrairTabelaDLH(buffer) {
     // TEMPERATURA
     // Linha correta:
     // Indicado | Padrão | Erro | Incerteza | k | Veff
+    // Exemplo: -19,9 | -20,0 | 0,1 | 0,2 | 2,00 | ∞
     // =========================
     if (lendoTemperatura && pontosTemperatura.length < 4 && valores.length >= 4) {
       const indicadoNum = valores[0];
