@@ -1,4 +1,7 @@
 import express from "express";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -7,6 +10,11 @@ import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
 
 const app = express();
 app.use(express.json());
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MODELO_RELATORIO_PATH = path.join(__dirname, "modelo-relatorio.xlsx");
+
 
 // =========================
 // CONFIG DLH
@@ -23,9 +31,6 @@ const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certifi
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
-
-
-
 
 
 // =========================
@@ -1369,18 +1374,37 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     );
 
     const todos = await r.json();
+
     const dados = (Array.isArray(todos) ? todos : []).filter(item =>
       mesmaData(item.criado_em, dataRelatorio)
     );
 
     const workbook = new ExcelJS.Workbook();
+
+    if (!fs.existsSync(MODELO_RELATORIO_PATH)) {
+      throw new Error(
+        "Arquivo modelo-relatorio.xlsx não encontrado na raiz do projeto. Adicione a planilha modelo no repositório com este nome."
+      );
+    }
+
+    await workbook.xlsx.readFile(MODELO_RELATORIO_PATH);
+
     workbook.creator = "ITA FRIA";
-    workbook.lastModifiedBy = "Sistema";
+    workbook.lastModifiedBy = "Sistema de Certificados DLH";
     workbook.created = new Date();
     workbook.modified = new Date();
 
-    const sheet = workbook.addWorksheet("Relatório DLH");
+    const sheet = workbook.worksheets[0];
 
+    if (!sheet) {
+      throw new Error("A planilha modelo não possui nenhuma aba.");
+    }
+
+    sheet.name = "Relatório DLH";
+
+    // =========================
+    // CONFIGURAÇÃO DE IMPRESSÃO
+    // =========================
     sheet.pageSetup = {
       paperSize: 9,
       orientation: "landscape",
@@ -1394,104 +1418,279 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
         right: 0.2,
         top: 0.3,
         bottom: 0.3,
-        header: 0.1,
-        footer: 0.1
+        header: 0.2,
+        footer: 0.2
       }
     };
 
-    sheet.properties.defaultRowHeight = 20;
+    sheet.headerFooter = sheet.headerFooter || {};
+    sheet.headerFooter.oddFooter =
+      sheet.headerFooter.oddFooter ||
+      "&LResp.: ________________________________&CSistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
 
-    sheet.mergeCells("A1:C3");
-    sheet.getCell("A1").value =
-`REL 06GQ09
-Versão: 00
-Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+    sheet.headerFooter.evenFooter = sheet.headerFooter.oddFooter;
+    sheet.headerFooter.firstFooter = sheet.headerFooter.oddFooter;
 
-    sheet.getCell("A1").alignment = {
-      vertical: "middle",
-      horizontal: "left",
-      wrapText: true
-    };
-    sheet.getCell("A1").font = { bold: true, size: 9, name: "Arial" };
+    // =========================
+    // HELPERS DO RELATÓRIO
+    // =========================
+    function textoCelula(cell) {
+      const v = cell?.value;
 
-    sheet.mergeCells("D1:X3");
-    sheet.getCell("D1").value =
-      "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174H / DLH";
-    sheet.getCell("D1").alignment = {
-      vertical: "middle",
-      horizontal: "center"
-    };
-    sheet.getCell("D1").font = { bold: true, size: 14, name: "Arial" };
+      if (v === null || v === undefined) return "";
 
-    sheet.mergeCells("A4:C4");
-    sheet.getCell("A4").value = "INSTRUMENTO";
+      if (typeof v === "object") {
+        if (v.richText) return v.richText.map(t => t.text || "").join("");
+        if (v.text) return String(v.text);
+        if (v.result !== undefined) return String(v.result);
+        if (v.formula) return String(v.formula);
+      }
 
-    sheet.mergeCells("D4:X4");
-    sheet.getCell("D4").value =
-      "ESPECIFICAÇÕES UMIDADE / TEMPERATURA / CRITÉRIOS DE ACEITAÇÃO";
+      return String(v);
+    }
 
-    ["A4", "D4"].forEach(c => {
-      sheet.getCell(c).font = { bold: true, size: 10, name: "Arial" };
-      sheet.getCell(c).alignment = { horizontal: "center", vertical: "middle" };
-      sheet.getCell(c).fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "D9D9D9" }
+    function clonar(obj) {
+      return obj ? JSON.parse(JSON.stringify(obj)) : {};
+    }
+
+    function aplicarBorda(cell, style = "thin") {
+      cell.border = {
+        top: { style },
+        left: { style },
+        bottom: { style },
+        right: { style }
       };
-    });
+    }
 
-    sheet.getCell("A5").value = "Marca: TESTO";
-    sheet.getCell("B5").value = "Modelo: 174H";
-    sheet.getCell("C5").value = "Tipo: Termohigrômetro";
-    sheet.getCell("D5").value = "Unidade: %u.r. / °C";
-    sheet.getCell("E5").value = "Critério: Erro + Incerteza";
+    function aplicarPadraoCelula(cell, baseStyle = null) {
+      if (baseStyle) {
+        cell.style = clonar(baseStyle);
+      }
 
-    const headerRow = 7;
+      aplicarBorda(cell, "thin");
 
-    sheet.getRow(headerRow).values = [
-      "N° Série",
-      "TAG",
-      "Calibrado em",
-      "Validade",
-      "Certificado",
-      "10% UR Erro",
-      "10% UR Inc.",
-      "10% UR Resultado",
-      "50% UR Erro",
-      "50% UR Inc.",
-      "50% UR Resultado",
-      "90% UR Erro",
-      "90% UR Inc.",
-      "90% UR Resultado",
-      "-20°C Erro",
-      "-20°C Inc.",
-      "-20°C Resultado",
-      "0°C Erro",
-      "0°C Inc.",
-      "0°C Resultado",
-      "15°C Erro",
-      "15°C Inc.",
-      "15°C Resultado",
-      "60°C Erro",
-      "60°C Inc.",
-      "60°C Resultado",
-      "RESULTADO"
-    ];
+      cell.alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true
+      };
 
-    sheet.getRow(headerRow).height = 35;
-    sheet.getRow(headerRow).font = { bold: true, size: 8, name: "Arial" };
-    sheet.getRow(headerRow).alignment = {
-      horizontal: "center",
-      vertical: "middle",
-      wrapText: true
-    };
-    sheet.getRow(headerRow).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "BFBFBF" }
-    };
+      cell.font = cell.font || {
+        name: "Arial",
+        size: 8
+      };
+    }
 
-    dados.forEach(c => {
+    function normalizarNumero(v) {
+      if (v === null || v === undefined || v === "") return "";
+      const n = Number(v);
+      if (Number.isNaN(n)) return v;
+      return n;
+    }
+
+    function encontrarLinhaCabecalhoTabela() {
+      let melhor = 0;
+
+      sheet.eachRow((row, rowNumber) => {
+        const textoLinha = row.values
+          .map(v => {
+            if (v === null || v === undefined) return "";
+            if (typeof v === "object") {
+              if (v.richText) return v.richText.map(t => t.text || "").join("");
+              if (v.text) return String(v.text);
+              if (v.result !== undefined) return String(v.result);
+            }
+            return String(v);
+          })
+          .join(" ")
+          .toUpperCase();
+
+        const temSerie = textoLinha.includes("SÉRIE") || textoLinha.includes("SERIE");
+        const temTag = textoLinha.includes("TAG") || textoLinha.includes("DLH");
+        const temCertificado = textoLinha.includes("CERTIFICADO");
+        const temResultado = textoLinha.includes("RESULTADO");
+
+        if (temSerie && temTag && (temCertificado || temResultado)) {
+          melhor = rowNumber;
+        }
+      });
+
+      return melhor || 7;
+    }
+
+    function encontrarLinhaAssinatura(aposLinha) {
+      let assinatura = 0;
+
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= aposLinha) return;
+
+        const textoLinha = row.values
+          .map(v => {
+            if (v === null || v === undefined) return "";
+            if (typeof v === "object") {
+              if (v.richText) return v.richText.map(t => t.text || "").join("");
+              if (v.text) return String(v.text);
+              if (v.result !== undefined) return String(v.result);
+            }
+            return String(v);
+          })
+          .join(" ")
+          .toUpperCase();
+
+        if (
+          textoLinha.includes("RESP") ||
+          textoLinha.includes("ASSIN") ||
+          textoLinha.includes("ELABORADO") ||
+          textoLinha.includes("REVISADO") ||
+          textoLinha.includes("APROVADO")
+        ) {
+          if (!assinatura || rowNumber < assinatura) assinatura = rowNumber;
+        }
+      });
+
+      return assinatura;
+    }
+
+    function preencherTextoSeEncontrar(procurar, valor) {
+      const alvo = String(procurar || "").toUpperCase();
+
+      sheet.eachRow(row => {
+        row.eachCell(cell => {
+          const t = textoCelula(cell).toUpperCase();
+
+          if (t.includes(alvo)) {
+            cell.value = valor;
+          }
+        });
+      });
+    }
+
+    function atualizarCabecalhoModelo() {
+      // Atualiza somente quando encontrar campos explícitos no modelo.
+      preencherTextoSeEncontrar("DATA:", `Data: ${formatarDataISOParaBR(dataRelatorio)}`);
+      preencherTextoSeEncontrar("DATA DO RELATÓRIO", `Data: ${formatarDataISOParaBR(dataRelatorio)}`);
+
+      // Segurança para modelos que usam A1/C1 como cabeçalho fixo.
+      const a1 = textoCelula(sheet.getCell("A1")).toUpperCase();
+
+      if (a1.includes("REL") || a1 === "") {
+        sheet.getCell("A1").value =
+`REL 06GQ09
+Versão: 01
+Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+        sheet.getCell("A1").alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true
+        };
+        sheet.getCell("A1").font = {
+          name: "Arial",
+          size: 8,
+          bold: true
+        };
+      }
+    }
+
+    function aplicarCorResultado(cell, valor) {
+      const texto = String(valor || "").toUpperCase();
+
+      if (texto === "APROVADO" || texto === "VÁLIDO" || texto === "VALIDO") {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "C6EFCE" }
+        };
+
+        cell.font = {
+          ...(cell.font || {}),
+          color: { argb: "006100" },
+          bold: true
+        };
+      }
+
+      if (texto === "REPROVADO" || texto === "ERRO" || texto === "VENCIDO") {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFC7CE" }
+        };
+
+        cell.font = {
+          ...(cell.font || {}),
+          color: { argb: "9C0006" },
+          bold: true
+        };
+      }
+    }
+
+    function aplicarCorSoma(cell, valor) {
+      const n = Number(valor);
+
+      if (Number.isNaN(n)) return;
+
+      if (n <= 0.5) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "C6EFCE" }
+        };
+        cell.font = {
+          ...(cell.font || {}),
+          color: { argb: "006100" },
+          bold: true
+        };
+      } else {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFC7CE" }
+        };
+        cell.font = {
+          ...(cell.font || {}),
+          color: { argb: "9C0006" },
+          bold: true
+        };
+      }
+    }
+
+    atualizarCabecalhoModelo();
+
+    const headerRow = encontrarLinhaCabecalhoTabela();
+    const dataStartRow = headerRow + 1;
+    let footerStartRow = encontrarLinhaAssinatura(headerRow);
+
+    if (!footerStartRow) {
+      footerStartRow = Math.max(sheet.rowCount + 3, dataStartRow + 1);
+    }
+
+    const baseStyle = clonar(sheet.getRow(dataStartRow).getCell(1).style);
+    const colCount = 27;
+
+    const linhasDisponiveis = Math.max(footerStartRow - dataStartRow, 0);
+
+    if (dados.length > linhasDisponiveis) {
+      const quantidadeInserir = dados.length - linhasDisponiveis;
+      sheet.spliceRows(footerStartRow, 0, ...Array.from({ length: quantidadeInserir }, () => []));
+      footerStartRow += quantidadeInserir;
+    }
+
+    // Limpa linhas da área de dados preservando o rodapé/assinaturas do modelo.
+    for (let rowNumber = dataStartRow; rowNumber < footerStartRow; rowNumber++) {
+      const row = sheet.getRow(rowNumber);
+
+      for (let col = 1; col <= colCount; col++) {
+        const cell = row.getCell(col);
+        cell.value = "";
+        aplicarPadraoCelula(cell, baseStyle);
+      }
+
+      row.height = 18;
+    }
+
+    dados.forEach((c, index) => {
+      const rowNumber = dataStartRow + index;
+      const row = sheet.getRow(rowNumber);
+
       const u = Array.isArray(c.pontos_umidade) ? c.pontos_umidade : [];
       const t = Array.isArray(c.pontos_temperatura) ? c.pontos_temperatura : [];
 
@@ -1504,104 +1703,111 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       const t3 = t[2] || {};
       const t4 = t[3] || {};
 
-      const row = sheet.addRow([
+      row.values = [
+        "",
         c.serie || "",
         normalizarDLH(c.dlh) || c.dlh || "",
         formatarDataISOParaBR(c.data),
         c.mes_ano_validade || "",
         c.certificado || "",
-        u1.erro ?? "",
-        u1.incerteza ?? "",
-        u1.soma ?? "",
-        u2.erro ?? "",
-        u2.incerteza ?? "",
-        u2.soma ?? "",
-        u3.erro ?? "",
-        u3.incerteza ?? "",
-        u3.soma ?? "",
-        t1.erro ?? "",
-        t1.incerteza ?? "",
-        t1.soma ?? "",
-        t2.erro ?? "",
-        t2.incerteza ?? "",
-        t2.soma ?? "",
-        t3.erro ?? "",
-        t3.incerteza ?? "",
-        t3.soma ?? "",
-        t4.erro ?? "",
-        t4.incerteza ?? "",
-        t4.soma ?? "",
+
+        normalizarNumero(u1.erro),
+        normalizarNumero(u1.incerteza),
+        normalizarNumero(u1.soma),
+
+        normalizarNumero(u2.erro),
+        normalizarNumero(u2.incerteza),
+        normalizarNumero(u2.soma),
+
+        normalizarNumero(u3.erro),
+        normalizarNumero(u3.incerteza),
+        normalizarNumero(u3.soma),
+
+        normalizarNumero(t1.erro),
+        normalizarNumero(t1.incerteza),
+        normalizarNumero(t1.soma),
+
+        normalizarNumero(t2.erro),
+        normalizarNumero(t2.incerteza),
+        normalizarNumero(t2.soma),
+
+        normalizarNumero(t3.erro),
+        normalizarNumero(t3.incerteza),
+        normalizarNumero(t3.soma),
+
+        normalizarNumero(t4.erro),
+        normalizarNumero(t4.incerteza),
+        normalizarNumero(t4.soma),
+
         c.status || ""
-      ]);
+      ];
 
-      row.height = 22;
+      row.height = 18;
 
-      if (String(c.status || "").toUpperCase() === "APROVADO") {
-        row.getCell(27).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "C6EFCE" }
-        };
-      }
+      for (let col = 1; col <= colCount; col++) {
+        const cell = row.getCell(col);
+        aplicarPadraoCelula(cell, baseStyle);
 
-      if (String(c.status || "").toUpperCase() === "REPROVADO") {
-        row.getCell(27).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFC7CE" }
-        };
-      }
-    });
-
-    const larguras = [
-      15, 13, 14, 13, 17,
-      11, 11, 12,
-      11, 11, 12,
-      11, 11, 12,
-      11, 11, 12,
-      11, 11, 12,
-      11, 11, 12,
-      11, 11, 12,
-      14
-    ];
-
-    larguras.forEach((w, i) => {
-      sheet.getColumn(i + 1).width = w;
-    });
-
-    sheet.eachRow((row, rowNumber) => {
-      row.eachCell(cell => {
-        cell.border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" }
-        };
-
-        cell.alignment = {
-          horizontal: "center",
-          vertical: "middle",
-          wrapText: true
-        };
-
-        if (rowNumber > headerRow) {
-          cell.font = {
-            name: "Arial",
-            size: 8
-          };
+        if ([8, 11, 14, 17, 20, 23, 26].includes(col)) {
+          aplicarCorSoma(cell, cell.value);
         }
-      });
+
+        if (col === 27) {
+          aplicarCorResultado(cell, cell.value);
+        }
+      }
     });
+
+    // Se não houver registros, mantém uma linha informativa dentro do modelo.
+    if (dados.length === 0) {
+      const row = sheet.getRow(dataStartRow);
+      row.getCell(1).value = "Nenhum certificado DLH processado na data selecionada.";
+      row.getCell(1).font = {
+        name: "Arial",
+        size: 9,
+        italic: true
+      };
+      row.getCell(1).alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true
+      };
+    }
+
+    // Garante rodapé de assinatura se o modelo não tiver bloco próprio.
+    const textoFooter = sheet.getRow(footerStartRow).values.join(" ").toUpperCase();
+
+    if (
+      !textoFooter.includes("RESP") &&
+      !textoFooter.includes("ASSIN") &&
+      !textoFooter.includes("ELABORADO") &&
+      !textoFooter.includes("APROVADO")
+    ) {
+      const assinaturaRow = dataStartRow + Math.max(dados.length, 1) + 2;
+
+      sheet.getRow(assinaturaRow).getCell(1).value = "Resp.: ________________________________";
+      sheet.getRow(assinaturaRow).getCell(10).value = "Sistema de Gestão da Qualidade ITA FRIA";
+      sheet.getRow(assinaturaRow).getCell(22).value = "Página &P de &N";
+
+      for (let col = 1; col <= colCount; col++) {
+        const cell = sheet.getRow(assinaturaRow).getCell(col);
+        cell.font = { name: "Arial", size: 8 };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+      }
+    }
+
+    // Repetir cabeçalho institucional/tabela na impressão.
+    sheet.pageSetup.printTitlesRow = `1:${headerRow}`;
+
+    const ultimaLinha = dataStartRow + Math.max(dados.length, 1) + 6;
+    sheet.pageSetup.printArea = `A1:AA${Math.max(ultimaLinha, sheet.rowCount)}`;
 
     sheet.views = [
       {
         state: "frozen",
-        ySplit: 7
+        ySplit: headerRow
       }
     ];
-
-    sheet.headerFooter.oddFooter =
-      "&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
 
     const nomeArquivo = `RELATORIO_DIARIO_DLH_${dataRelatorio}.xlsx`;
 
@@ -1618,7 +1824,11 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
     await workbook.xlsx.write(res);
     return res.end();
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    console.error(e);
+
+    return res.status(500).json({
+      erro: e.message
+    });
   }
 });
 
