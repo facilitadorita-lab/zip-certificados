@@ -33,6 +33,8 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVAT
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 
 
+
+
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -1368,25 +1370,13 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
   try {
     const dataRelatorio = req.query.data || obterHojeISO();
 
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
-      { headers: supabaseHeaders() }
-    );
-
-    const todos = await r.json();
-
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
-
-    const workbook = new ExcelJS.Workbook();
-
     if (!fs.existsSync(MODELO_RELATORIO_PATH)) {
       throw new Error(
         "Arquivo modelo-relatorio.xlsx não encontrado na raiz do projeto. Adicione a planilha modelo no repositório com este nome."
       );
     }
 
+    const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(MODELO_RELATORIO_PATH);
 
     workbook.creator = "ITA FRIA";
@@ -1401,6 +1391,17 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     }
 
     sheet.name = "Relatório DLH";
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const todos = await r.json();
+
+    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
+      mesmaData(item.criado_em, dataRelatorio)
+    );
 
     // =========================
     // CONFIGURAÇÃO DE IMPRESSÃO
@@ -1424,17 +1425,19 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     };
 
     sheet.headerFooter = sheet.headerFooter || {};
-    sheet.headerFooter.oddFooter =
+
+    const footerOriginal =
       sheet.headerFooter.oddFooter ||
       "&LResp.: ________________________________&CSistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
 
-    sheet.headerFooter.evenFooter = sheet.headerFooter.oddFooter;
-    sheet.headerFooter.firstFooter = sheet.headerFooter.oddFooter;
+    sheet.headerFooter.oddFooter = footerOriginal;
+    sheet.headerFooter.evenFooter = footerOriginal;
+    sheet.headerFooter.firstFooter = footerOriginal;
 
     // =========================
     // HELPERS DO RELATÓRIO
     // =========================
-    function textoCelula(cell) {
+    function valorTexto(cell) {
       const v = cell?.value;
 
       if (v === null || v === undefined) return "";
@@ -1463,7 +1466,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     }
 
     function aplicarPadraoCelula(cell, baseStyle = null) {
-      if (baseStyle) {
+      if (baseStyle && Object.keys(baseStyle).length > 0) {
         cell.style = clonar(baseStyle);
       }
 
@@ -1475,40 +1478,38 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
         wrapText: true
       };
 
-      cell.font = cell.font || {
+      cell.font = {
+        ...(cell.font || {}),
         name: "Arial",
         size: 8
       };
     }
 
-    function normalizarNumero(v) {
+    function numeroOuVazio(v) {
       if (v === null || v === undefined || v === "") return "";
       const n = Number(v);
-      if (Number.isNaN(n)) return v;
-      return n;
+      return Number.isNaN(n) ? v : n;
+    }
+
+    function textoLinha(row) {
+      const valores = [];
+
+      row.eachCell({ includeEmpty: true }, cell => {
+        valores.push(valorTexto(cell));
+      });
+
+      return valores.join(" ").toUpperCase();
     }
 
     function encontrarLinhaCabecalhoTabela() {
       let melhor = 0;
 
       sheet.eachRow((row, rowNumber) => {
-        const textoLinha = row.values
-          .map(v => {
-            if (v === null || v === undefined) return "";
-            if (typeof v === "object") {
-              if (v.richText) return v.richText.map(t => t.text || "").join("");
-              if (v.text) return String(v.text);
-              if (v.result !== undefined) return String(v.result);
-            }
-            return String(v);
-          })
-          .join(" ")
-          .toUpperCase();
-
-        const temSerie = textoLinha.includes("SÉRIE") || textoLinha.includes("SERIE");
-        const temTag = textoLinha.includes("TAG") || textoLinha.includes("DLH");
-        const temCertificado = textoLinha.includes("CERTIFICADO");
-        const temResultado = textoLinha.includes("RESULTADO");
+        const t = textoLinha(row);
+        const temSerie = t.includes("SÉRIE") || t.includes("SERIE");
+        const temTag = t.includes("TAG") || t.includes("DLH");
+        const temCertificado = t.includes("CERTIFICADO");
+        const temResultado = t.includes("RESULTADO");
 
         if (temSerie && temTag && (temCertificado || temResultado)) {
           melhor = rowNumber;
@@ -1519,61 +1520,47 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     }
 
     function encontrarLinhaAssinatura(aposLinha) {
-      let assinatura = 0;
+      let linhaEncontrada = 0;
 
       sheet.eachRow((row, rowNumber) => {
         if (rowNumber <= aposLinha) return;
 
-        const textoLinha = row.values
-          .map(v => {
-            if (v === null || v === undefined) return "";
-            if (typeof v === "object") {
-              if (v.richText) return v.richText.map(t => t.text || "").join("");
-              if (v.text) return String(v.text);
-              if (v.result !== undefined) return String(v.result);
-            }
-            return String(v);
-          })
-          .join(" ")
-          .toUpperCase();
+        const t = textoLinha(row);
 
         if (
-          textoLinha.includes("RESP") ||
-          textoLinha.includes("ASSIN") ||
-          textoLinha.includes("ELABORADO") ||
-          textoLinha.includes("REVISADO") ||
-          textoLinha.includes("APROVADO")
+          t.includes("RESP") ||
+          t.includes("ASSIN") ||
+          t.includes("ELABORADO") ||
+          t.includes("REVISADO") ||
+          t.includes("APROVADO")
         ) {
-          if (!assinatura || rowNumber < assinatura) assinatura = rowNumber;
+          if (!linhaEncontrada || rowNumber < linhaEncontrada) {
+            linhaEncontrada = rowNumber;
+          }
         }
       });
 
-      return assinatura;
-    }
-
-    function preencherTextoSeEncontrar(procurar, valor) {
-      const alvo = String(procurar || "").toUpperCase();
-
-      sheet.eachRow(row => {
-        row.eachCell(cell => {
-          const t = textoCelula(cell).toUpperCase();
-
-          if (t.includes(alvo)) {
-            cell.value = valor;
-          }
-        });
-      });
+      return linhaEncontrada;
     }
 
     function atualizarCabecalhoModelo() {
-      // Atualiza somente quando encontrar campos explícitos no modelo.
-      preencherTextoSeEncontrar("DATA:", `Data: ${formatarDataISOParaBR(dataRelatorio)}`);
-      preencherTextoSeEncontrar("DATA DO RELATÓRIO", `Data: ${formatarDataISOParaBR(dataRelatorio)}`);
+      sheet.eachRow(row => {
+        row.eachCell(cell => {
+          const t = valorTexto(cell).toUpperCase();
 
-      // Segurança para modelos que usam A1/C1 como cabeçalho fixo.
-      const a1 = textoCelula(sheet.getCell("A1")).toUpperCase();
+          if (t.includes("DATA DO RELATÓRIO")) {
+            cell.value = `Data do relatório: ${formatarDataISOParaBR(dataRelatorio)}`;
+          }
 
-      if (a1.includes("REL") || a1 === "") {
+          if (t.startsWith("DATA:") || t === "DATA") {
+            cell.value = `Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+          }
+        });
+      });
+
+      const a1 = valorTexto(sheet.getCell("A1")).toUpperCase();
+
+      if (!a1 || a1.includes("REL")) {
         sheet.getCell("A1").value =
 `REL 06GQ09
 Versão: 01
@@ -1600,11 +1587,12 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
           pattern: "solid",
           fgColor: { argb: "C6EFCE" }
         };
-
         cell.font = {
           ...(cell.font || {}),
-          color: { argb: "006100" },
-          bold: true
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "006100" }
         };
       }
 
@@ -1614,11 +1602,12 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
           pattern: "solid",
           fgColor: { argb: "FFC7CE" }
         };
-
         cell.font = {
           ...(cell.font || {}),
-          color: { argb: "9C0006" },
-          bold: true
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "9C0006" }
         };
       }
     }
@@ -1636,8 +1625,10 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
         };
         cell.font = {
           ...(cell.font || {}),
-          color: { argb: "006100" },
-          bold: true
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "006100" }
         };
       } else {
         cell.fill = {
@@ -1647,8 +1638,10 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
         };
         cell.font = {
           ...(cell.font || {}),
-          color: { argb: "9C0006" },
-          bold: true
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "9C0006" }
         };
       }
     }
@@ -1663,28 +1656,31 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       footerStartRow = Math.max(sheet.rowCount + 3, dataStartRow + 1);
     }
 
-    const baseStyle = clonar(sheet.getRow(dataStartRow).getCell(1).style);
-    const colCount = 27;
-
     const linhasDisponiveis = Math.max(footerStartRow - dataStartRow, 0);
 
     if (dados.length > linhasDisponiveis) {
       const quantidadeInserir = dados.length - linhasDisponiveis;
-      sheet.spliceRows(footerStartRow, 0, ...Array.from({ length: quantidadeInserir }, () => []));
+      sheet.spliceRows(
+        footerStartRow,
+        0,
+        ...Array.from({ length: quantidadeInserir }, () => [])
+      );
       footerStartRow += quantidadeInserir;
     }
 
-    // Limpa linhas da área de dados preservando o rodapé/assinaturas do modelo.
+    const baseStyle = clonar(sheet.getRow(dataStartRow).getCell(1).style);
+    const colCount = 27;
+
+    // Limpa somente a área de dados, preservando o cabeçalho e o rodapé/assinaturas do modelo.
     for (let rowNumber = dataStartRow; rowNumber < footerStartRow; rowNumber++) {
       const row = sheet.getRow(rowNumber);
+      row.height = 18;
 
       for (let col = 1; col <= colCount; col++) {
         const cell = row.getCell(col);
         cell.value = "";
         aplicarPadraoCelula(cell, baseStyle);
       }
-
-      row.height = 18;
     }
 
     dados.forEach((c, index) => {
@@ -1711,33 +1707,33 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
         c.mes_ano_validade || "",
         c.certificado || "",
 
-        normalizarNumero(u1.erro),
-        normalizarNumero(u1.incerteza),
-        normalizarNumero(u1.soma),
+        numeroOuVazio(u1.erro),
+        numeroOuVazio(u1.incerteza),
+        numeroOuVazio(u1.soma),
 
-        normalizarNumero(u2.erro),
-        normalizarNumero(u2.incerteza),
-        normalizarNumero(u2.soma),
+        numeroOuVazio(u2.erro),
+        numeroOuVazio(u2.incerteza),
+        numeroOuVazio(u2.soma),
 
-        normalizarNumero(u3.erro),
-        normalizarNumero(u3.incerteza),
-        normalizarNumero(u3.soma),
+        numeroOuVazio(u3.erro),
+        numeroOuVazio(u3.incerteza),
+        numeroOuVazio(u3.soma),
 
-        normalizarNumero(t1.erro),
-        normalizarNumero(t1.incerteza),
-        normalizarNumero(t1.soma),
+        numeroOuVazio(t1.erro),
+        numeroOuVazio(t1.incerteza),
+        numeroOuVazio(t1.soma),
 
-        normalizarNumero(t2.erro),
-        normalizarNumero(t2.incerteza),
-        normalizarNumero(t2.soma),
+        numeroOuVazio(t2.erro),
+        numeroOuVazio(t2.incerteza),
+        numeroOuVazio(t2.soma),
 
-        normalizarNumero(t3.erro),
-        normalizarNumero(t3.incerteza),
-        normalizarNumero(t3.soma),
+        numeroOuVazio(t3.erro),
+        numeroOuVazio(t3.incerteza),
+        numeroOuVazio(t3.soma),
 
-        normalizarNumero(t4.erro),
-        normalizarNumero(t4.incerteza),
-        normalizarNumero(t4.soma),
+        numeroOuVazio(t4.erro),
+        numeroOuVazio(t4.incerteza),
+        numeroOuVazio(t4.soma),
 
         c.status || ""
       ];
@@ -1758,49 +1754,27 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       }
     });
 
-    // Se não houver registros, mantém uma linha informativa dentro do modelo.
     if (dados.length === 0) {
       const row = sheet.getRow(dataStartRow);
       row.getCell(1).value = "Nenhum certificado DLH processado na data selecionada.";
-      row.getCell(1).font = {
-        name: "Arial",
-        size: 9,
-        italic: true
-      };
       row.getCell(1).alignment = {
         horizontal: "center",
         vertical: "middle",
         wrapText: true
       };
+      row.getCell(1).font = {
+        name: "Arial",
+        size: 9,
+        italic: true
+      };
     }
 
-    // Garante rodapé de assinatura se o modelo não tiver bloco próprio.
-    const textoFooter = sheet.getRow(footerStartRow).values.join(" ").toUpperCase();
-
-    if (
-      !textoFooter.includes("RESP") &&
-      !textoFooter.includes("ASSIN") &&
-      !textoFooter.includes("ELABORADO") &&
-      !textoFooter.includes("APROVADO")
-    ) {
-      const assinaturaRow = dataStartRow + Math.max(dados.length, 1) + 2;
-
-      sheet.getRow(assinaturaRow).getCell(1).value = "Resp.: ________________________________";
-      sheet.getRow(assinaturaRow).getCell(10).value = "Sistema de Gestão da Qualidade ITA FRIA";
-      sheet.getRow(assinaturaRow).getCell(22).value = "Página &P de &N";
-
-      for (let col = 1; col <= colCount; col++) {
-        const cell = sheet.getRow(assinaturaRow).getCell(col);
-        cell.font = { name: "Arial", size: 8 };
-        cell.alignment = { horizontal: "center", vertical: "middle" };
-      }
-    }
-
-    // Repetir cabeçalho institucional/tabela na impressão.
+    // Repetição de cabeçalho e área de impressão.
     sheet.pageSetup.printTitlesRow = `1:${headerRow}`;
 
-    const ultimaLinha = dataStartRow + Math.max(dados.length, 1) + 6;
-    sheet.pageSetup.printArea = `A1:AA${Math.max(ultimaLinha, sheet.rowCount)}`;
+    const ultimaLinhaComDados = dataStartRow + Math.max(dados.length, 1) - 1;
+    const ultimaLinha = Math.max(footerStartRow + 6, ultimaLinhaComDados + 8, sheet.rowCount);
+    sheet.pageSetup.printArea = `A1:AA${ultimaLinha}`;
 
     sheet.views = [
       {
