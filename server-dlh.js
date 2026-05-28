@@ -19,6 +19,7 @@ const MODELO_RELATORIO_PATH = path.join(__dirname, "modelo-relatorio.xlsx");
 // =========================
 // CONFIG DLH
 // =========================
+
 const PORT = process.env.PORT || 3001;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://padjfnfysbzaehkqmoyx.supabase.co";
@@ -31,7 +32,6 @@ const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certifi
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
 
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
-
 
 
 
@@ -726,6 +726,62 @@ async function extrairTabelaDLH(buffer) {
   };
 }
 
+
+// =========================
+// CRITÉRIOS DE ACEITAÇÃO
+// =========================
+async function buscarCriteriosCalibracao() {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?select=*&order=id.desc&limit=1`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    if (!Array.isArray(data) || data.length === 0) {
+      return {
+        limite_temperatura: 0.5,
+        limite_umidade: 5.0
+      };
+    }
+
+    return {
+      limite_temperatura: Number(data[0].limite_temperatura ?? 0.5),
+      limite_umidade: Number(data[0].limite_umidade ?? 5.0),
+      atualizado_em: data[0].atualizado_em || null
+    };
+  } catch (e) {
+    console.log("Erro ao buscar critérios de calibração, usando padrão:", e.message);
+
+    return {
+      limite_temperatura: 0.5,
+      limite_umidade: 5.0
+    };
+  }
+}
+
+function avaliarStatusDLH(pontosUmidade = [], pontosTemperatura = [], criterios = {}) {
+  const limiteTemperatura = Number(criterios.limite_temperatura ?? 0.5);
+  const limiteUmidade = Number(criterios.limite_umidade ?? 5.0);
+
+  const umidadeOk = (Array.isArray(pontosUmidade) ? pontosUmidade : []).every(
+    p => Number(p.soma) <= limiteUmidade
+  );
+
+  const temperaturaOk = (Array.isArray(pontosTemperatura) ? pontosTemperatura : []).every(
+    p => Number(p.soma) <= limiteTemperatura
+  );
+
+  return {
+    aprovado: umidadeOk && temperaturaOk,
+    umidade_ok: umidadeOk,
+    temperatura_ok: temperaturaOk,
+    limite_temperatura: limiteTemperatura,
+    limite_umidade: limiteUmidade
+  };
+}
+
 // =========================
 // PROCESSAMENTO
 // =========================
@@ -754,14 +810,23 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
       };
     }
 
-    const todos = [...tabela.pontos_umidade, ...tabela.pontos_temperatura];
-    const aprovado = todos.every(p => p.soma <= 0.5);
+    const criterios = await buscarCriteriosCalibracao();
+    const avaliacao = avaliarStatusDLH(
+      tabela.pontos_umidade,
+      tabela.pontos_temperatura,
+      criterios
+    );
 
     return {
-      status: aprovado ? "APROVADO" : "REPROVADO",
+      status: avaliacao.aprovado ? "APROVADO" : "REPROVADO",
       pontos_umidade: tabela.pontos_umidade,
       pontos_temperatura: tabela.pontos_temperatura,
       certificado: meta.certificado || "",
+      criterios_aceitacao: {
+        limite_temperatura: avaliacao.limite_temperatura,
+        limite_umidade: avaliacao.limite_umidade
+      },
+      avaliacao,
       meta
     };
   } catch (e) {
@@ -1050,6 +1115,91 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
 // =========================
 app.get("/", (req, res) => {
   res.send("API DLH OK 🚀");
+});
+
+
+app.get("/dlh/criterios", async (req, res) => {
+  try {
+    const criterios = await buscarCriteriosCalibracao();
+    res.json(criterios);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.patch("/dlh/criterios", async (req, res) => {
+  try {
+    const limiteTemperatura = Number(req.body.limite_temperatura);
+    const limiteUmidade = Number(req.body.limite_umidade);
+
+    if (Number.isNaN(limiteTemperatura) || limiteTemperatura <= 0) {
+      return res.status(400).json({ erro: "limite_temperatura deve ser maior que zero." });
+    }
+
+    if (Number.isNaN(limiteUmidade) || limiteUmidade <= 0) {
+      return res.status(400).json({ erro: "limite_umidade deve ser maior que zero." });
+    }
+
+    const busca = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?select=id&order=id.desc&limit=1`,
+      { headers: supabaseHeaders() }
+    );
+
+    const registros = await busca.json();
+    const existente = Array.isArray(registros) && registros.length > 0 ? registros[0] : null;
+
+    let resposta;
+
+    if (existente?.id) {
+      resposta = await fetch(
+        `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.${existente.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            ...supabaseHeaders(),
+            Prefer: "return=representation"
+          },
+          body: JSON.stringify({
+            limite_temperatura: limiteTemperatura,
+            limite_umidade: limiteUmidade,
+            atualizado_em: new Date().toISOString()
+          })
+        }
+      );
+    } else {
+      resposta = await fetch(
+        `${SUPABASE_URL}/rest/v1/criterios_calibracao`,
+        {
+          method: "POST",
+          headers: {
+            ...supabaseHeaders(),
+            Prefer: "return=representation"
+          },
+          body: JSON.stringify({
+            limite_temperatura: limiteTemperatura,
+            limite_umidade: limiteUmidade,
+            atualizado_em: new Date().toISOString()
+          })
+        }
+      );
+    }
+
+    if (!resposta.ok) {
+      return res.status(500).json({ erro: await resposta.text() });
+    }
+
+    const data = await resposta.json();
+
+    res.json({
+      sucesso: true,
+      criterios: Array.isArray(data) && data.length ? data[0] : {
+        limite_temperatura: limiteTemperatura,
+        limite_umidade: limiteUmidade
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.get("/dlh/status", async (req, res) => {
@@ -1356,9 +1506,12 @@ app.get("/dlh/relatorio-dia/dados", async (req, res) => {
       mesmaData(item.criado_em, dataRelatorio)
     );
 
+    const criterios = await buscarCriteriosCalibracao();
+
     res.json({
       data_relatorio: dataRelatorio,
       total: dados.length,
+      criterios_aceitacao: criterios,
       registros: dados
     });
   } catch (e) {
@@ -1402,6 +1555,10 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     const dados = (Array.isArray(todos) ? todos : []).filter(item =>
       mesmaData(item.criado_em, dataRelatorio)
     );
+
+    const criteriosRelatorio = await buscarCriteriosCalibracao();
+    const limiteTemperaturaRelatorio = Number(criteriosRelatorio.limite_temperatura ?? 0.5);
+    const limiteUmidadeRelatorio = Number(criteriosRelatorio.limite_umidade ?? 5.0);
 
     // =========================
     // CONFIGURAÇÃO DE IMPRESSÃO
@@ -1612,12 +1769,13 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       }
     }
 
-    function aplicarCorSoma(cell, valor) {
+    function aplicarCorSoma(cell, valor, limite) {
       const n = Number(valor);
+      const limiteAceitacao = Number(limite);
 
-      if (Number.isNaN(n)) return;
+      if (Number.isNaN(n) || Number.isNaN(limiteAceitacao)) return;
 
-      if (n <= 0.5) {
+      if (n <= limiteAceitacao) {
         cell.fill = {
           type: "pattern",
           pattern: "solid",
@@ -1744,8 +1902,15 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
         const cell = row.getCell(col);
         aplicarPadraoCelula(cell, baseStyle);
 
-        if ([8, 11, 14, 17, 20, 23, 26].includes(col)) {
-          aplicarCorSoma(cell, cell.value);
+        // Colunas de soma:
+        // Umidade: 8, 11, 14 → limite dinâmico de umidade.
+        // Temperatura: 17, 20, 23, 26 → limite dinâmico de temperatura.
+        if ([8, 11, 14].includes(col)) {
+          aplicarCorSoma(cell, cell.value, limiteUmidadeRelatorio);
+        }
+
+        if ([17, 20, 23, 26].includes(col)) {
+          aplicarCorSoma(cell, cell.value, limiteTemperaturaRelatorio);
         }
 
         if (col === 27) {
