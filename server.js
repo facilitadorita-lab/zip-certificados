@@ -17,11 +17,8 @@ app.use(express.json());
 // =========================
 // CONFIG
 // =========================
-// =========================
-// CONFIG
-// =========================
-const SUPABASE_URL = "https://padjfnfysbzaehkqmoyx.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBhZGpmbmZ5c2J6YWVoa3Ftb3l4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0NTE1OTIsImV4cCI6MjA5MjAyNzU5Mn0.l3xmdwJfu-NDGpoN9MhzQHlW522eO4JX4xgjybRi7vU";
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://xnzlryunuuwtwvhejeyr.supabase.co/rest/v1/";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "sb_secret_uxIl1K1gvbm1aD3L5LV8EA_XwjyCm04";
 const FOLDER_ID = process.env.FOLDER_ID || "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
 const REPORTS_FOLDER_ID = process.env.REPORTS_FOLDER_ID || "1K0F4EdL2i5y9A1kQF-NlsdPv4zijjHMV";
 const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
