@@ -48,11 +48,17 @@ const drive = googleAuth ? google.drive({ version: "v3", auth: googleAuth }) : n
 // HELPERS
 // =========================
 function supabaseHeaders() {
-  return {
+  const headers = {
     apikey: SUPABASE_KEY,
-    Authorization: `Bearer ${SUPABASE_KEY}`,
     "Content-Type": "application/json"
   };
+
+  // Somente chaves antigas JWT usam Bearer
+  if (SUPABASE_KEY.split(".").length === 3) {
+    headers.Authorization = `Bearer ${SUPABASE_KEY}`;
+  }
+
+  return headers;
 }
 
 function parseBR(v) {
