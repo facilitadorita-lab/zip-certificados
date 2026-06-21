@@ -8,10 +8,15 @@ import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
 import fetch from "node-fetch";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
+import crypto from "crypto";
+import zlib from "zlib";
 
 const app = express();
 app.use(express.json());
 
+// =========================
+// CONFIG
+// =========================
 // =========================
 // CONFIG
 // =========================
@@ -24,8 +29,6 @@ const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certificados@calcium-bot-493618-e2.iam.gserviceaccount.com";
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
 const LOGO_URL = process.env.LOGO_URL || "https://drive.google.com/file/d/1RFnwmMsi1e-x8ktTzb-2IZXTRuXEng9x/view?usp=drive_link";
-
-
 const LIMITE = 50;
 
 // =========================
@@ -130,6 +133,199 @@ function escaparHtml(valor) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+
+
+// =========================
+// FILTROS POR PERIODO / DOWNLOAD EM MASSA
+// =========================
+const downloadJobs = new Map();
+
+function limparNomeArquivo(nome) {
+  return String(nome || "certificado.pdf")
+    .replace(/[\/:*?"<>|]/g, "-")
+    .replace(/s+/g, " ")
+    .trim()
+    .slice(0, 180) || "certificado.pdf";
+}
+
+function normalizarListaQuery(valor) {
+  if (Array.isArray(valor)) return valor.flatMap(normalizarListaQuery);
+  return String(valor || "")
+    .split(/[;,\n]/)
+    .map(v => v.trim())
+    .filter(Boolean);
+}
+
+function normalizarDataQuery(valor) {
+  const v = String(valor || "").trim();
+  if (!v) return "";
+  if (/^d{4}-d{2}-d{2}$/.test(v)) return v;
+  return formatarDataBRparaISO(v);
+}
+
+function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamentos, testeInicio, testeFim }) {
+  const params = new URLSearchParams();
+  params.set("select", "*");
+  params.set(campoEquipamento, `in.(${equipamentos.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
+  params.set("data", `lte.${testeFim}`);
+  params.set("vencimento", `gte.${testeInicio}`);
+  params.append("order", `${campoEquipamento}.asc`);
+  params.append("order", "data.asc");
+  return `${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`;
+}
+
+function crc32(buf) {
+  let crc = -1;
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= buf[i];
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ -1) >>> 0;
+}
+
+function dosDateTime(date = new Date()) {
+  const year = Math.max(date.getFullYear(), 1980);
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+
+function criarZip(entries) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  const { dosTime, dosDate } = dosDateTime();
+
+  for (const entry of entries) {
+    const nameBuffer = Buffer.from(limparNomeArquivo(entry.name), "utf8");
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data || "");
+    const compressed = zlib.deflateRawSync(data, { level: 1 });
+    const crc = crc32(data);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuffer.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, nameBuffer, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(dosTime, 12);
+    central.writeUInt16LE(dosDate, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBuffer.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBuffer);
+
+    offset += local.length + nameBuffer.length + compressed.length;
+  }
+
+  const centralSize = centrals.reduce((sum, b) => sum + b.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralSize, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...locals, ...centrals, end]);
+}
+
+async function esperar(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function baixarArquivoDriveComRetry(fileId, tentativas = 4) {
+  let ultimoErro;
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      return await baixarArquivoDrive(fileId);
+    } catch (e) {
+      ultimoErro = e;
+      const status = Number(e?.response?.status || String(e.message || "").match(/\b(403|429|5\d\d)\b/)?.[1] || 0);
+      if (![403, 429, 500, 502, 503, 504].includes(status) && i > 0) break;
+      await esperar(Math.min(30000, (2 ** i) * 1000 + Math.floor(Math.random() * 500)));
+    }
+  }
+  throw ultimoErro;
+}
+
+async function salvarZipNoDrive(zipPath, nomeArquivo) {
+  if (!drive) throw new Error("Credenciais Google Drive não configuradas");
+  if (!DOWNLOADS_FOLDER_ID) throw new Error("DOWNLOADS_FOLDER_ID, REPORTS_FOLDER_ID ou FOLDER_ID não configurado");
+
+  const response = await drive.files.create({
+    requestBody: {
+      name: nomeArquivo,
+      parents: [DOWNLOADS_FOLDER_ID],
+      mimeType: "application/zip"
+    },
+    media: {
+      mimeType: "application/zip",
+      body: fs.createReadStream(zipPath)
+    },
+    fields: "id, name, webViewLink, webContentLink",
+    supportsAllDrives: true
+  });
+
+  return response.data;
+}
+
+async function processarDownloadMassa(jobId, registros) {
+  const job = downloadJobs.get(jobId);
+  const entries = [];
+  job.status = "processando";
+  job.total = registros.length;
+  job.atualizado_em = new Date().toISOString();
+
+  for (const item of registros) {
+    try {
+      const buffer = await baixarArquivoDriveComRetry(item.id);
+      entries.push({ name: item.nome_download || item.nome_original || `DLT_${item.id}.pdf`, data: buffer });
+      job.processados++;
+    } catch (e) {
+      job.falhas++;
+      job.erros.push({ id: item.id, nome: item.nome_download || item.nome_original, erro: e.message });
+    }
+    job.atualizado_em = new Date().toISOString();
+  }
+
+  if (!entries.length) throw new Error("Nenhum certificado foi baixado com sucesso");
+
+  const nomeArquivo = `CERTIFICADOS_DLT_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
+  const zipPath = path.join(os.tmpdir(), nomeArquivo);
+  await fs.promises.writeFile(zipPath, criarZip(entries));
+  const arquivoDrive = await salvarZipNoDrive(zipPath, nomeArquivo);
+
+  job.status = "concluido";
+  job.arquivo_zip_nome = nomeArquivo;
+  job.arquivo_zip_drive_id = arquivoDrive.id || null;
+  job.arquivo_zip_link = arquivoDrive.webViewLink || arquivoDrive.webContentLink || null;
+  job.atualizado_em = new Date().toISOString();
 }
 
 function verificarValidade(dataISO) {
@@ -1061,29 +1257,34 @@ app.get("/status", async (req, res) => {
 
 app.get("/certificados", async (req, res) => {
   try {
+    const listaEquipamentos = normalizarListaQuery(req.query.equipamentos || req.query.dlt || req.query.lista);
+    const testeInicio = normalizarDataQuery(req.query.teste_inicio || req.query.data_inicio || req.query.inicio);
+    const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
+
+    if (listaEquipamentos.length && testeInicio && testeFim) {
+      const r = await fetch(
+        montarUrlCertificadosPorPeriodo({
+          tabela: "certificados",
+          campoEquipamento: "dlt",
+          equipamentos: listaEquipamentos,
+          testeInicio,
+          testeFim
+        }),
+        { headers: supabaseHeaders() }
+      );
+      const data = await r.json();
+      if (!r.ok) return res.status(r.status).json({ erro: data });
+      return res.json({ total: Array.isArray(data) ? data.length : 0, registros: data });
+    }
+
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
-
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc&limit=${limit}&offset=${offset}`,
-      {
-        headers: {
-          ...supabaseHeaders(),
-          Prefer: "count=exact"
-        }
-      }
+      { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
-
     const data = await r.json();
-    const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
-
-    res.json({
-      total,
-      limit,
-      offset,
-      registros: data
-    });
+    res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || 0), registros: data });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -1319,6 +1520,81 @@ app.get("/pendentes", async (req, res) => {
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
+});
+
+
+app.post("/downloads/massa", async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).filter(Boolean) : [];
+    const listaEquipamentos = Array.isArray(req.body?.equipamentos)
+      ? req.body.equipamentos.map(String).filter(Boolean)
+      : normalizarListaQuery(req.body?.equipamentos || req.body?.dlt || req.body?.lista);
+    const testeInicio = normalizarDataQuery(req.body?.teste_inicio || req.body?.data_inicio || req.body?.inicio);
+    const testeFim = normalizarDataQuery(req.body?.teste_fim || req.body?.data_fim || req.body?.fim);
+
+    let registros = [];
+
+    if (ids.length) {
+      const params = new URLSearchParams();
+      params.set("select", "id,nome_original,nome_download,dlt,serie,data,vencimento");
+      params.set("id", `in.(${ids.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados?${params.toString()}`, { headers: supabaseHeaders() });
+      registros = await r.json();
+      if (!r.ok) return res.status(r.status).json({ erro: registros });
+    } else if (listaEquipamentos.length && testeInicio && testeFim) {
+      const r = await fetch(
+        montarUrlCertificadosPorPeriodo({
+          tabela: "certificados",
+          campoEquipamento: "dlt",
+          equipamentos: listaEquipamentos,
+          testeInicio,
+          testeFim
+        }),
+        { headers: supabaseHeaders() }
+      );
+      registros = await r.json();
+      if (!r.ok) return res.status(r.status).json({ erro: registros });
+    } else {
+      return res.status(400).json({ erro: "Informe ids ou equipamentos + teste_inicio + teste_fim" });
+    }
+
+    const jobId = crypto.randomUUID();
+    downloadJobs.set(jobId, {
+      id: jobId,
+      tipo: "DLT",
+      status: "pendente",
+      total: Array.isArray(registros) ? registros.length : 0,
+      processados: 0,
+      falhas: 0,
+      erros: [],
+      arquivo_zip_nome: null,
+      arquivo_zip_drive_id: null,
+      arquivo_zip_link: null,
+      criado_em: new Date().toISOString(),
+      atualizado_em: new Date().toISOString()
+    });
+
+    setTimeout(() => {
+      processarDownloadMassa(jobId, Array.isArray(registros) ? registros : []).catch(e => {
+        const job = downloadJobs.get(jobId);
+        if (job) {
+          job.status = "erro";
+          job.erro = e.message;
+          job.atualizado_em = new Date().toISOString();
+        }
+      });
+    }, 0);
+
+    res.status(202).json({ job_id: jobId, total: registros.length });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/downloads/massa/:jobId", (req, res) => {
+  const job = downloadJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+  res.json(job);
 });
 
 app.get("/download/:id", async (req, res) => {
