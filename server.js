@@ -1840,6 +1840,43 @@ app.get("/downloads/massa/:jobId", (req, res) => {
   res.json(job);
 });
 
+app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
+  try {
+    const job = downloadJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+    if (job.status !== "concluido" || !job.arquivo_zip_drive_id) {
+      return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
+    }
+    if (!drive) {
+      return res.status(503).json({ erro: "Google Drive não configurado" });
+    }
+
+    const arquivo = await executarGoogleComRetry(() =>
+      drive.files.get(
+        {
+          fileId: job.arquivo_zip_drive_id,
+          alt: "media",
+          supportsAllDrives: true
+        },
+        { responseType: "stream" }
+      )
+    );
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${job.arquivo_zip_nome || "certificados-dlt.zip"}"`
+    );
+    arquivo.data.on("error", e => {
+      if (!res.headersSent) res.status(500).json({ erro: e.message });
+      else res.destroy(e);
+    });
+    arquivo.data.pipe(res);
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/download/:id", async (req, res) => {
   try {
     const id = req.params.id;
