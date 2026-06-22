@@ -43,6 +43,17 @@ const DOWNLOADS_FOLDER_ID_DLH =
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
+const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
+const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
+const CERTIFICADOS_DLH_LISTA_SELECT = [
+  "id", "nome_original", "nome_download", "dlh", "serie", "data",
+  "certificado", "status", "validade", "vencimento", "mes_ano_validade",
+  "divergente", "duplicado", "serie_esperada", "motivo_divergencia", "criado_em"
+].join(",");
+
+let statusCacheDLH = { expiraEm: 0, valor: null };
+let idsBancoCacheDLH = { expiraEm: 0, valor: null };
+let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
 
 
 // =========================
@@ -105,6 +116,25 @@ function dividirEmLotes(lista, tamanho = 100) {
   return lotes;
 }
 
+function invalidarCachesDLH() {
+  statusCacheDLH = { expiraEm: 0, valor: null };
+}
+
+async function contarTabela(tabela) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?select=id`, {
+    headers: { ...supabaseHeaders(), Prefer: "count=exact", Range: "0-0" }
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(
+      `Supabase ${tabela}: ${data.message || data.error || response.statusText} (HTTP ${response.status})`
+    );
+  }
+
+  return Number(response.headers.get("content-range")?.split("/")[1] || 0);
+}
+
 function parseBR(v) {
   if (v === null || v === undefined) return NaN;
   return parseFloat(String(v).replace(",", "."));
@@ -150,7 +180,7 @@ function normalizarDataQuery(valor) {
 
 function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamentos, testeInicio, testeFim }) {
   const params = new URLSearchParams();
-  params.set("select", "*");
+  params.set("select", CERTIFICADOS_DLH_LISTA_SELECT);
   params.set(campoEquipamento, `in.(${equipamentos.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
   params.set("data", `lte.${testeFim}`);
   params.set("vencimento", `gte.${testeInicio}`);
@@ -1217,6 +1247,10 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
 // BANCO
 // =========================
 async function buscarIdsBancoDLH() {
+  if (idsBancoCacheDLH.valor && idsBancoCacheDLH.expiraEm > Date.now()) {
+    return idsBancoCacheDLH.valor;
+  }
+
   const ids = new Set();
   const limit = 1000;
   let offset = 0;
@@ -1240,10 +1274,15 @@ async function buscarIdsBancoDLH() {
     offset += limit;
   }
 
+  idsBancoCacheDLH = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
   return ids;
 }
 
 async function buscarIdsExcluidosDLH() {
+  if (idsExcluidosCacheDLH.valor && idsExcluidosCacheDLH.expiraEm > Date.now()) {
+    return idsExcluidosCacheDLH.valor;
+  }
+
   const ids = new Set();
   const limit = 1000;
   let offset = 0;
@@ -1267,25 +1306,12 @@ async function buscarIdsExcluidosDLH() {
     offset += limit;
   }
 
+  idsExcluidosCacheDLH = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
   return ids;
 }
 
 async function contarCertificadosBancoDLH() {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id`,
-    {
-      headers: {
-        ...supabaseHeaders(),
-        Prefer: "count=exact",
-        Range: "0-0"
-      }
-    }
-  );
-
-  const contentRange = r.headers.get("content-range");
-  if (!contentRange) return 0;
-
-  return Number(contentRange.split("/")[1] || 0);
+  return contarTabela("certificados_dlh");
 }
 
 // =========================
@@ -1369,7 +1395,9 @@ async function executarSyncDLH() {
         continue;
       }
 
+      idsBanco.add(f.id);
       processados++;
+      invalidarCachesDLH();
     } catch (e) {
       erros.push({
         arquivo: f.name,
@@ -1571,21 +1599,27 @@ app.patch("/dlh/criterios", async (req, res) => {
 
 app.get("/dlh/status", async (req, res) => {
   try {
+    if (statusCacheDLH.valor && statusCacheDLH.expiraEm > Date.now()) {
+      res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+      return res.json(statusCacheDLH.valor);
+    }
+
     const totalBanco = await contarCertificadosBancoDLH();
-    const idsBanco = await buscarIdsBancoDLH();
-    const idsExcluidos = await buscarIdsExcluidosDLH();
+    const totalExcluidos = await contarTabela("certificados_dlh_excluidos");
     const arquivosDrive = await buscarArquivosDriveDLH();
 
     const totalDrive = arquivosDrive.length;
-    const faltantes = arquivosDrive.filter(
-      f => !idsBanco.has(f.id) && !idsExcluidos.has(f.id)
-    ).length;
+    const faltantes = Math.max(0, totalDrive - totalBanco - totalExcluidos);
 
-    res.json({
+    const payload = {
       total_drive: totalDrive,
       total_banco: totalBanco,
       faltantes
-    });
+    };
+
+    statusCacheDLH = { valor: payload, expiraEm: Date.now() + STATUS_CACHE_MS };
+    res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+    res.json(payload);
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -1669,10 +1703,11 @@ app.get("/dlh/certificados", async (req, res) => {
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=${CERTIFICADOS_DLH_LISTA_SELECT}&order=data.desc&limit=${limit}&offset=${offset}`,
       { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
     const data = await r.json();
+    res.setHeader("Cache-Control", "private, max-age=30");
     res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || 0), registros: data });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1685,7 +1720,7 @@ app.get("/dlh/divergentes", async (req, res) => {
     const offset = Number(req.query.offset || 0);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&or=(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null,status.eq.ERRO)&order=criado_em.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=${CERTIFICADOS_DLH_LISTA_SELECT}&or=(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null,status.eq.ERRO)&order=criado_em.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -1989,6 +2024,10 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
         erro: `Falha ao excluir da base principal: ${erroBanco}`
       });
     }
+
+    idsBancoCacheDLH.valor?.delete(id);
+    idsExcluidosCacheDLH.valor?.add(id);
+    invalidarCachesDLH();
 
     res.json({
       sucesso: true,
