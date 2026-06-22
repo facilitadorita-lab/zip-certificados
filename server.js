@@ -10,23 +10,33 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
 import crypto from "crypto";
 import zlib from "zlib";
+import archiver from "archiver";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
 // =========================
 // CONFIG
 // =========================
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://xnzlryunuuwtwvhejeyr.supabase.co/rest/v1/";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "sb_secret_uxIl1K1gvbm1aD3L5LV8EA_XwjyCm04";
-const FOLDER_ID = process.env.FOLDER_ID || "1SZO18AAITa3-3wI86zcZi2yGR6RXtUZ_";
-const REPORTS_FOLDER_ID = process.env.REPORTS_FOLDER_ID || "1K0F4EdL2i5y9A1kQF-NlsdPv4zijjHMV";
-const GOOGLE_API_KEY = "AIzaSyC6KlqA8q9ZUo_4WRC-pIy7P6kg85WMP3s";
-
-const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "id-drive-certificados@calcium-bot-493618-e2.iam.gserviceaccount.com";
-const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV5dgC9gPzZ+Va\nELqoquU0YE8BbPptJ2zsUBr+WzGOJUbeWWyrgo9yqeTYwSzcWKeK11GmRgepgKxc\nkQ4ucxceTil9xsH4+AxcciNYiPFquvkKH0i9/UhkK/WCfbR+OsvCXyx4YtAEK7ju\nLkJ7rQabOsftrIv+XIkiah9tZO6ft2qn3nISRuOaRat3VW9xJeeN/Ba1QZN+6FEl\nV6roHubWbLEn4b7I6nbU/uBy/f7Gu0V52CJNXIdTmYIpuwJvc86MV+/IVDqN/233\nJGmVOEZvkx6RP99sTPxd79jjZsuTnUvCI70ggypusOJZWcb7rEKvrscreKuDydYv\njB3NXXdfAgMBAAECggEACXldI5rV+sM262uJeP/b/k5NvlhsKmC9EfJ/LGKWduwi\nKXMSI/HSfL4XS52yz2FPenZzDWEiS1joFk/uet9qJLnj9WHT8aOHy9VAySK3q4Ym\n+Ow0NdLkKluwGI/zNxKC0Ycs2kackOXtRc95IZU8xHj9pgKNTz6C0t1nqvOPhjXU\nbakMNhX5ckWc132esSXVOGOBenTqjsJcIadNuEcUtcPbx17EJT2P0WOFTOkVHffO\nBWycBcD6N6G6p7p457TfCHjcK6be/kNhTtnX5tUmw9Xy+Cpv5bihKfYZXqD7BrEn\nSs/KireqMUYIPx/7JfdMABIXu2Yt2OZ6APA2xlGPAQKBgQDu2du9ARZapf5M2nTa\n6LJCvanjWOcybRYZBQ5a0HsDnFRG+bkHHQ2Lo4zlSWZQghlPv0VrVrw5epePSwzK\nc2g7sx05nU3UChsIli1isPRkbJrqF2CI54ppyS5JIXIyIVYCl041wE7R5LLz2ulL\nPAclJOr8AhMZ/Cs2noJOnnnTQQKBgQDlQVb1WK2hcxL97dS2FWeeDnL76OTs7vU0\nj+E7hyYBWUzOFIkijtI1DGSV/MIChWOgrNSNw5BTlEtMTsuDP5VwTOjibhBcrc2B\nFea7w5y+eMzHiGNWFNE0aW5nX2Xd4EELFYmZx8ruPUgN27mfT9CvQOxg9FBT+7h4\nvmJp0pzCnwKBgFhCZqFTuofqmKqbety9acmhvhpFasFGcAj0xlYmfZ5a8QV9F7Ma\nODwmRlUfp1AOkv3V5vgAB/ORalnH2MUimhydVipJB05YIZ8tpz21t8k4HJJt6v0L\n2ii274SUeFcv3FF+yaaxFi8XPE1B0j07xEQkfTR8K8TJWsqHDg2xH8FBAoGBAKfd\n9EKqsFjr3hg5seuyOLEve1qh6h7jyoC2agIgr9+E+AxeVRwM4Dcf3/dDoPwfmBfq\n9ajobiIFEC3L9JEiWdZlOpGybiCu0y+WTeFnFrsR0UC5yaMakyWBnenrnLeeoYHw\nP1VvSlSwYrZjEcRpuTDapTtJKhiU1Tr0jTNXmJmZAoGAZRcXd+zBm3spGwGmopD5\nVduVSHESwUucfM6g/UDkzpmRkTWjUAOo7gl/jT4ycoM2IGIjQO8/3hOapoCPmI/v\nSoKlQMJsqDMCz2Y8yOCSPes0sI00qpbXijmkes8eegIc6309l7bgPzlqQXdH2dGW\nCKbtjgeGUVDEXl8fD77sazc=\n-----END PRIVATE KEY-----\n").replace(/\\n/g, "\n").replace(/\\n/g, "\n");
-const LOGO_URL = process.env.LOGO_URL || "https://drive.google.com/file/d/1RFnwmMsi1e-x8ktTzb-2IZXTRuXEng9x/view?usp=drive_link";
-const LIMITE = 50;
+const PORT = Number(process.env.PORT || 3000);
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
+const FOLDER_ID = process.env.FOLDER_ID || "";
+const REPORTS_FOLDER_ID = process.env.REPORTS_FOLDER_ID || "";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
+const DOWNLOADS_FOLDER_ID =
+  process.env.DOWNLOADS_FOLDER_ID || REPORTS_FOLDER_ID || FOLDER_ID || "";
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const LOGO_URL = process.env.LOGO_URL || "";
+const LIMITE = Number(process.env.LIMITE || 50);
 
 // =========================
 // GOOGLE DRIVE AUTH
@@ -59,6 +69,33 @@ function supabaseHeaders() {
   }
 
   return headers;
+}
+
+function validarConfiguracaoBasica() {
+  if (!SUPABASE_URL) throw new Error("SUPABASE_URL não configurada no Render");
+  if (!SUPABASE_KEY) throw new Error("SUPABASE_KEY não configurada no Render");
+}
+
+function validarListaSupabase(response, data, contexto) {
+  if (response.ok && Array.isArray(data)) return data;
+
+  const detalhe =
+    data?.message ||
+    data?.error_description ||
+    data?.error ||
+    data?.hint ||
+    response.statusText ||
+    "resposta inesperada";
+
+  throw new Error(`${contexto}: ${detalhe} (HTTP ${response.status})`);
+}
+
+function dividirEmLotes(lista, tamanho = 100) {
+  const lotes = [];
+  for (let i = 0; i < lista.length; i += tamanho) {
+    lotes.push(lista.slice(i, i + tamanho));
+  }
+  return lotes;
 }
 
 function parseBR(v) {
@@ -148,7 +185,7 @@ const downloadJobs = new Map();
 function limparNomeArquivo(nome) {
   return String(nome || "certificado.pdf")
     .replace(/[\/:*?"<>|]/g, "-")
-    .replace(/s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180) || "certificado.pdf";
 }
@@ -164,7 +201,7 @@ function normalizarListaQuery(valor) {
 function normalizarDataQuery(valor) {
   const v = String(valor || "").trim();
   if (!v) return "";
-  if (/^d{4}-d{2}-d{2}$/.test(v)) return v;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
   return formatarDataBRparaISO(v);
 }
 
@@ -177,6 +214,77 @@ function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamento
   params.append("order", `${campoEquipamento}.asc`);
   params.append("order", "data.asc");
   return `${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`;
+}
+
+async function buscarCertificadosPorPeriodoEmLotes({
+  tabela,
+  campoEquipamento,
+  equipamentos,
+  testeInicio,
+  testeFim
+}) {
+  validarConfiguracaoBasica();
+
+  if (testeInicio > testeFim) {
+    throw new Error("A data inicial do teste não pode ser posterior à data final");
+  }
+
+  const normalizados = [...new Set(
+    equipamentos
+      .map(normalizarDLT)
+      .filter(Boolean)
+  )];
+
+  const resultados = [];
+  for (const lote of dividirEmLotes(normalizados, 100)) {
+    let inicio = 0;
+    const tamanhoPagina = 1000;
+
+    while (true) {
+      const response = await fetch(
+        montarUrlCertificadosPorPeriodo({
+          tabela,
+          campoEquipamento,
+          equipamentos: lote,
+          testeInicio,
+          testeFim
+        }),
+        {
+          headers: {
+            ...supabaseHeaders(),
+            Range: `${inicio}-${inicio + tamanhoPagina - 1}`
+          }
+        }
+      );
+      const data = await response.json();
+      const pagina = validarListaSupabase(response, data, `Supabase ${tabela}`);
+      resultados.push(...pagina);
+      if (pagina.length < tamanhoPagina) break;
+      inicio += tamanhoPagina;
+    }
+  }
+
+  return resultados;
+}
+
+async function buscarCertificadosPorIdsEmLotes(tabela, campos, ids) {
+  validarConfiguracaoBasica();
+  const resultados = [];
+  const idsUnicos = [...new Set(ids.map(String).filter(Boolean))];
+
+  for (const lote of dividirEmLotes(idsUnicos, 100)) {
+    const params = new URLSearchParams();
+    params.set("select", campos);
+    params.set("id", `in.(${lote.map(v => v.replace(/[()"]/g, "")).join(",")})`);
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    resultados.push(...validarListaSupabase(response, data, `Supabase ${tabela}`));
+  }
+
+  return resultados;
 }
 
 function crc32(buf) {
@@ -298,37 +406,75 @@ async function salvarZipNoDrive(zipPath, nomeArquivo) {
   return response.data;
 }
 
+async function criarZipNoDisco(registros, zipPath, job) {
+  const pastaTemporaria = await fs.promises.mkdtemp(path.join(os.tmpdir(), "certificados-dlt-"));
+  const arquivos = [];
+
+  try {
+    for (let index = 0; index < registros.length; index++) {
+      const item = registros[index];
+      try {
+        const buffer = await baixarArquivoDriveComRetry(item.id);
+        const nome = limparNomeArquivo(
+          item.nome_download || item.nome_original || `DLT_${item.id}.pdf`
+        );
+        const caminho = path.join(pastaTemporaria, `${String(index + 1).padStart(4, "0")}_${nome}`);
+        await fs.promises.writeFile(caminho, buffer);
+        arquivos.push({ caminho, nome });
+        job.processados++;
+      } catch (e) {
+        job.falhas++;
+        job.erros.push({
+          id: item.id,
+          nome: item.nome_download || item.nome_original,
+          erro: e.message
+        });
+      }
+      job.atualizado_em = new Date().toISOString();
+    }
+
+    if (!arquivos.length) {
+      throw new Error("Nenhum certificado foi baixado com sucesso");
+    }
+
+    await new Promise((resolve, reject) => {
+      const output = fs.createWriteStream(zipPath);
+      const archive = archiver("zip", { zlib: { level: 1 } });
+      output.on("close", resolve);
+      output.on("error", reject);
+      archive.on("warning", reject);
+      archive.on("error", reject);
+      archive.pipe(output);
+      for (const arquivo of arquivos) {
+        archive.file(arquivo.caminho, { name: arquivo.nome });
+      }
+      archive.finalize();
+    });
+  } finally {
+    await fs.promises.rm(pastaTemporaria, { recursive: true, force: true });
+  }
+}
+
 async function processarDownloadMassa(jobId, registros) {
   const job = downloadJobs.get(jobId);
-  const entries = [];
   job.status = "processando";
   job.total = registros.length;
   job.atualizado_em = new Date().toISOString();
 
-  for (const item of registros) {
-    try {
-      const buffer = await baixarArquivoDriveComRetry(item.id);
-      entries.push({ name: item.nome_download || item.nome_original || `DLT_${item.id}.pdf`, data: buffer });
-      job.processados++;
-    } catch (e) {
-      job.falhas++;
-      job.erros.push({ id: item.id, nome: item.nome_download || item.nome_original, erro: e.message });
-    }
-    job.atualizado_em = new Date().toISOString();
-  }
-
-  if (!entries.length) throw new Error("Nenhum certificado foi baixado com sucesso");
-
   const nomeArquivo = `CERTIFICADOS_DLT_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
   const zipPath = path.join(os.tmpdir(), nomeArquivo);
-  await fs.promises.writeFile(zipPath, criarZip(entries));
-  const arquivoDrive = await salvarZipNoDrive(zipPath, nomeArquivo);
+  try {
+    await criarZipNoDisco(registros, zipPath, job);
+    const arquivoDrive = await salvarZipNoDrive(zipPath, nomeArquivo);
 
-  job.status = "concluido";
-  job.arquivo_zip_nome = nomeArquivo;
-  job.arquivo_zip_drive_id = arquivoDrive.id || null;
-  job.arquivo_zip_link = arquivoDrive.webViewLink || arquivoDrive.webContentLink || null;
-  job.atualizado_em = new Date().toISOString();
+    job.status = "concluido";
+    job.arquivo_zip_nome = nomeArquivo;
+    job.arquivo_zip_drive_id = arquivoDrive.id || null;
+    job.arquivo_zip_link = arquivoDrive.webViewLink || arquivoDrive.webContentLink || null;
+    job.atualizado_em = new Date().toISOString();
+  } finally {
+    await fs.promises.rm(zipPath, { force: true });
+  }
 }
 
 function verificarValidade(dataISO) {
@@ -789,7 +935,17 @@ async function salvarRelatorioNoDrive(pdfPath, nomeArquivo) {
 // PDF / TEXTO
 // =========================
 async function baixarArquivoDrive(fileId) {
-  const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  if (drive) {
+    const response = await drive.files.get(
+      { fileId, alt: "media", supportsAllDrives: true },
+      { responseType: "arraybuffer" }
+    );
+    return Buffer.from(response.data);
+  }
+
+  const url =
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}` +
+    `?alt=media&key=${encodeURIComponent(GOOGLE_API_KEY)}&supportsAllDrives=true`;
   const res = await fetch(url);
 
   if (!res.ok) {
@@ -1020,6 +1176,7 @@ async function buscarControleSync() {
   );
 
   const data = await r.json();
+  validarListaSupabase(r, data, "Supabase controle_sync");
   return data && data.length ? data[0] : null;
 }
 
@@ -1035,6 +1192,7 @@ async function buscarIdsBanco() {
     );
 
     const data = await r.json();
+    validarListaSupabase(r, data, "Supabase certificados");
 
     if (!data || data.length === 0) break;
 
@@ -1061,6 +1219,7 @@ async function buscarIdsExcluidos() {
     );
 
     const data = await r.json();
+    validarListaSupabase(r, data, "Supabase certificados_excluidos");
 
     if (!data || data.length === 0) break;
 
@@ -1095,6 +1254,26 @@ async function contarCertificadosBanco() {
 }
 
 async function buscarArquivosDrive() {
+  if (drive) {
+    const arquivos = [];
+    let pageToken = null;
+
+    do {
+      const response = await drive.files.list({
+        q: `'${FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false`,
+        fields: "nextPageToken, files(id, name, mimeType)",
+        pageSize: 1000,
+        pageToken: pageToken || undefined,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+      });
+      arquivos.push(...(response.data.files || []));
+      pageToken = response.data.nextPageToken || null;
+    } while (pageToken);
+
+    return arquivos;
+  }
+
   const arquivos = [];
   let pageToken = null;
 
@@ -1103,6 +1282,9 @@ async function buscarArquivosDrive() {
 
     const res = await fetch(url);
     const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data?.error?.message || `Erro ao listar Google Drive (HTTP ${res.status})`);
+    }
 
     arquivos.push(...(data.files || []));
     pageToken = data.nextPageToken || null;
@@ -1265,19 +1447,14 @@ app.get("/certificados", async (req, res) => {
     const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
 
     if (listaEquipamentos.length && testeInicio && testeFim) {
-      const r = await fetch(
-        montarUrlCertificadosPorPeriodo({
-          tabela: "certificados",
-          campoEquipamento: "dlt",
-          equipamentos: listaEquipamentos,
-          testeInicio,
-          testeFim
-        }),
-        { headers: supabaseHeaders() }
-      );
-      const data = await r.json();
-      if (!r.ok) return res.status(r.status).json({ erro: data });
-      return res.json({ total: Array.isArray(data) ? data.length : 0, registros: data });
+      const data = await buscarCertificadosPorPeriodoEmLotes({
+        tabela: "certificados",
+        campoEquipamento: "dlt",
+        equipamentos: listaEquipamentos,
+        testeInicio,
+        testeFim
+      });
+      return res.json({ total: data.length, registros: data });
     }
 
     const limit = Number(req.query.limit || 100);
@@ -1441,6 +1618,7 @@ app.get("/reprocess", async (req, res) => {
     );
 
     const lista = await r.json();
+    validarListaSupabase(r, lista, "Supabase certificados para reprocessamento");
     let total = 0;
 
     for (const item of lista) {
@@ -1538,25 +1716,19 @@ app.post("/downloads/massa", async (req, res) => {
     let registros = [];
 
     if (ids.length) {
-      const params = new URLSearchParams();
-      params.set("select", "id,nome_original,nome_download,dlt,serie,data,vencimento");
-      params.set("id", `in.(${ids.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/certificados?${params.toString()}`, { headers: supabaseHeaders() });
-      registros = await r.json();
-      if (!r.ok) return res.status(r.status).json({ erro: registros });
-    } else if (listaEquipamentos.length && testeInicio && testeFim) {
-      const r = await fetch(
-        montarUrlCertificadosPorPeriodo({
-          tabela: "certificados",
-          campoEquipamento: "dlt",
-          equipamentos: listaEquipamentos,
-          testeInicio,
-          testeFim
-        }),
-        { headers: supabaseHeaders() }
+      registros = await buscarCertificadosPorIdsEmLotes(
+        "certificados",
+        "id,nome_original,nome_download,dlt,serie,data,vencimento",
+        ids
       );
-      registros = await r.json();
-      if (!r.ok) return res.status(r.status).json({ erro: registros });
+    } else if (listaEquipamentos.length && testeInicio && testeFim) {
+      registros = await buscarCertificadosPorPeriodoEmLotes({
+        tabela: "certificados",
+        campoEquipamento: "dlt",
+        equipamentos: listaEquipamentos,
+        testeInicio,
+        testeFim
+      });
     } else {
       return res.status(400).json({ erro: "Informe ids ou equipamentos + teste_inicio + teste_fim" });
     }
@@ -2138,4 +2310,4 @@ app.get("/relatorio-dia", async (req, res) => {
   res.redirect("/relatorio-dia/html");
 });
 
-app.listen(3000, () => console.log("Servidor rodando 🚀"));
+app.listen(PORT, () => console.log(`Servidor DLT rodando na porta ${PORT} 🚀`));
