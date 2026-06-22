@@ -10,7 +10,10 @@ import os from "os";
 import crypto from "crypto";
 import zlib from "zlib";
 import archiver from "archiver";
+import dns from "dns";
 import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
+
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -310,6 +313,31 @@ async function esperar(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function executarGoogleComRetry(operacao, tentativas = 5) {
+  let ultimoErro;
+
+  for (let tentativa = 0; tentativa < tentativas; tentativa++) {
+    try {
+      return await operacao();
+    } catch (e) {
+      ultimoErro = e;
+      const status = Number(e?.response?.status || e?.code || 0);
+      const mensagem = String(e?.message || "").toLowerCase();
+      const recuperavel =
+        [408, 429, 500, 502, 503, 504].includes(status) ||
+        mensagem.includes("premature close") ||
+        mensagem.includes("socket hang up") ||
+        mensagem.includes("econnreset") ||
+        mensagem.includes("etimedout");
+
+      if (!recuperavel || tentativa === tentativas - 1) throw e;
+      await esperar(Math.min(15000, 1000 * (2 ** tentativa)));
+    }
+  }
+
+  throw ultimoErro;
+}
+
 async function baixarArquivoDriveComRetry(fileId, tentativas = 4) {
   let ultimoErro;
   for (let i = 0; i < tentativas; i++) {
@@ -585,14 +613,16 @@ async function buscarArquivosDriveDLH() {
     let pageToken = null;
 
     do {
-      const response = await drive.files.list({
-        q: `'${FOLDER_ID_DLH}' in parents and mimeType='application/pdf' and trashed=false`,
-        fields: "nextPageToken, files(id, name, mimeType)",
-        pageSize: 1000,
-        pageToken: pageToken || undefined,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true
-      });
+      const response = await executarGoogleComRetry(() =>
+        drive.files.list({
+          q: `'${FOLDER_ID_DLH}' in parents and mimeType='application/pdf' and trashed=false`,
+          fields: "nextPageToken, files(id, name,mimeType)",
+          pageSize: 1000,
+          pageToken: pageToken || undefined,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
+        })
+      );
 
       arquivos.push(...(response.data.files || []));
       pageToken = response.data.nextPageToken || null;
@@ -1558,6 +1588,43 @@ app.get("/dlh/status", async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/status/supabase", async (req, res) => {
+  try {
+    const totalBanco = await contarCertificadosBancoDLH();
+    res.json({ ok: true, servico: "supabase", total_banco: totalBanco });
+  } catch (e) {
+    res.status(500).json({ ok: false, servico: "supabase", erro: e.message });
+  }
+});
+
+app.get("/dlh/status/google", async (req, res) => {
+  try {
+    if (!googleAuth || !drive) {
+      throw new Error("GOOGLE_CLIENT_EMAIL ou GOOGLE_PRIVATE_KEY não configurado");
+    }
+
+    await executarGoogleComRetry(() => googleAuth.getAccessToken());
+    const response = await executarGoogleComRetry(() =>
+      drive.files.list({
+        q: `'${FOLDER_ID_DLH}' in parents and trashed=false`,
+        fields: "files(id)",
+        pageSize: 1,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+      })
+    );
+
+    res.json({
+      ok: true,
+      servico: "google_drive",
+      pasta_acessivel: true,
+      arquivos_encontrados_no_teste: response.data.files?.length || 0
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, servico: "google_drive", erro: e.message });
   }
 });
 
