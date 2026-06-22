@@ -40,6 +40,30 @@ const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 const LOGO_URL = process.env.LOGO_URL || "";
 const LIMITE = Number(process.env.LIMITE || 50);
+const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
+const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
+const CERTIFICADOS_LISTA_SELECT = [
+  "id",
+  "nome_original",
+  "nome_download",
+  "dlt",
+  "serie",
+  "data",
+  "certificado",
+  "status",
+  "validade",
+  "vencimento",
+  "mes_ano_validade",
+  "divergente",
+  "duplicado",
+  "serie_esperada",
+  "motivo_divergencia",
+  "criado_em"
+].join(",");
+
+let statusCache = { expiraEm: 0, valor: null };
+let idsBancoCache = { expiraEm: 0, valor: null };
+let idsExcluidosCache = { expiraEm: 0, valor: null };
 
 // =========================
 // GOOGLE DRIVE AUTH
@@ -99,6 +123,30 @@ function dividirEmLotes(lista, tamanho = 100) {
     lotes.push(lista.slice(i, i + tamanho));
   }
   return lotes;
+}
+
+function invalidarCaches() {
+  statusCache = { expiraEm: 0, valor: null };
+}
+
+async function contarTabela(tabela) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?select=id`, {
+    headers: {
+      ...supabaseHeaders(),
+      Prefer: "count=exact",
+      Range: "0-0"
+    }
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(
+      `Supabase ${tabela}: ${data.message || data.error || response.statusText} (HTTP ${response.status})`
+    );
+  }
+
+  const total = response.headers.get("content-range")?.split("/")[1];
+  return Number(total || 0);
 }
 
 function parseBR(v) {
@@ -210,7 +258,7 @@ function normalizarDataQuery(valor) {
 
 function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamentos, testeInicio, testeFim }) {
   const params = new URLSearchParams();
-  params.set("select", "*");
+  params.set("select", CERTIFICADOS_LISTA_SELECT);
   params.set(campoEquipamento, `in.(${equipamentos.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
   params.set("data", `lte.${testeFim}`);
   params.set("vencimento", `gte.${testeInicio}`);
@@ -1209,6 +1257,10 @@ async function buscarControleSync() {
 }
 
 async function buscarIdsBanco() {
+  if (idsBancoCache.valor && idsBancoCache.expiraEm > Date.now()) {
+    return idsBancoCache.valor;
+  }
+
   const ids = new Set();
   const limit = 1000;
   let offset = 0;
@@ -1232,10 +1284,15 @@ async function buscarIdsBanco() {
     offset += limit;
   }
 
+  idsBancoCache = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
   return ids;
 }
 
 async function buscarIdsExcluidos() {
+  if (idsExcluidosCache.valor && idsExcluidosCache.expiraEm > Date.now()) {
+    return idsExcluidosCache.valor;
+  }
+
   const ids = new Set();
   const limit = 1000;
   let offset = 0;
@@ -1259,26 +1316,12 @@ async function buscarIdsExcluidos() {
     offset += limit;
   }
 
+  idsExcluidosCache = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
   return ids;
 }
 
 async function contarCertificadosBanco() {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/certificados?select=id`,
-    {
-      headers: {
-        ...supabaseHeaders(),
-        Prefer: "count=exact",
-        Range: "0-0"
-      }
-    }
-  );
-
-  const contentRange = r.headers.get("content-range");
-  if (!contentRange) return 0;
-
-  const total = contentRange.split("/")[1];
-  return Number(total || 0);
+  return contarTabela("certificados");
 }
 
 async function buscarArquivosDrive() {
@@ -1396,7 +1439,9 @@ async function executarSyncEmBackground() {
           continue;
         }
 
+        idsBanco.add(f.id);
         processados++;
+        invalidarCaches();
 
         await atualizarControleSync({
           em_execucao: true,
@@ -1445,18 +1490,20 @@ app.get("/", (req, res) => {
 
 app.get("/status", async (req, res) => {
   try {
+    if (statusCache.valor && statusCache.expiraEm > Date.now()) {
+      res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+      return res.json(statusCache.valor);
+    }
+
     const controle = await buscarControleSync();
     const totalBanco = await contarCertificadosBanco();
-    const idsBanco = await buscarIdsBanco();
-    const idsExcluidos = await buscarIdsExcluidos();
+    const totalExcluidos = await contarTabela("certificados_excluidos");
     const arquivosDrive = await buscarArquivosDrive();
 
     const totalDrive = arquivosDrive.length;
-    const faltantes = arquivosDrive.filter(
-      f => !idsBanco.has(f.id) && !idsExcluidos.has(f.id)
-    ).length;
+    const faltantes = Math.max(0, totalDrive - totalBanco - totalExcluidos);
 
-    res.json({
+    const payload = {
       id: controle?.id || 1,
       total_processados: controle?.total_processados || 0,
       em_execucao: controle?.em_execucao || false,
@@ -1464,7 +1511,11 @@ app.get("/status", async (req, res) => {
       total_drive: totalDrive,
       total_banco: totalBanco,
       faltantes
-    });
+    };
+
+    statusCache = { valor: payload, expiraEm: Date.now() + STATUS_CACHE_MS };
+    res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
+    res.json(payload);
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -1528,10 +1579,11 @@ app.get("/certificados", async (req, res) => {
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados?select=${CERTIFICADOS_LISTA_SELECT}&order=data.desc&limit=${limit}&offset=${offset}`,
       { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
     const data = await r.json();
+    res.setHeader("Cache-Control", "private, max-age=30");
     res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || 0), registros: data });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1544,7 +1596,7 @@ app.get("/divergentes", async (req, res) => {
     const offset = Number(req.query.offset || 0);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados?select=${CERTIFICADOS_LISTA_SELECT}&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -1965,6 +2017,10 @@ app.delete("/certificados/:id", async (req, res) => {
         erro: `Falha ao excluir da base principal: ${erroBanco}`
       });
     }
+
+    idsBancoCache.valor?.delete(id);
+    idsExcluidosCache.valor?.add(id);
+    invalidarCaches();
 
     return res.json({
       sucesso: true,
