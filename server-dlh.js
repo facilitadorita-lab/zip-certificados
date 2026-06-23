@@ -1,18 +1,18 @@
 import express from "express";
 import fs from "fs";
-import os from "os";
 import path from "path";
-import { chromium } from "playwright";
-import { google } from "googleapis";
-import { MAPA_LOGGERS, normalizarDLT } from "./mapa-loggers.js";
+import { fileURLToPath } from "url";
 import fetchNative from "node-fetch";
+import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
+import os from "os";
 import crypto from "crypto";
 import zlib from "zlib";
 import archiver from "archiver";
 import dns from "dns";
 import { createClient } from "@supabase/supabase-js";
+import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -37,27 +37,33 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, _res, next) => {
-  if (req.url.startsWith("/certificados/downloads/massa")) {
-    req.url = req.url.replace("/certificados/downloads/massa", "/downloads/massa");
+  if (req.url.startsWith("/dlh/certificados/downloads/massa")) {
+    req.url = req.url.replace(
+      "/dlh/certificados/downloads/massa",
+      "/dlh/downloads/massa"
+    );
   }
   next();
 });
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MODELO_RELATORIO_PATH = path.join(__dirname, "modelo-relatorio.xlsx");
+
+
 // =========================
-// CONFIG
+// CONFIG DLH
 // =========================
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3001);
 const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
-const FOLDER_ID = process.env.FOLDER_ID || "";
-const REPORTS_FOLDER_ID = process.env.REPORTS_FOLDER_ID || "";
+const FOLDER_ID_DLH = process.env.FOLDER_ID_DLH || "";
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
-const DOWNLOADS_FOLDER_ID =
-  process.env.DOWNLOADS_FOLDER_ID || REPORTS_FOLDER_ID || FOLDER_ID || "";
+const DOWNLOADS_FOLDER_ID_DLH =
+  process.env.DOWNLOADS_FOLDER_ID_DLH || FOLDER_ID_DLH || "";
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-const LOGO_URL = process.env.LOGO_URL || "";
-const LIMITE = Number(process.env.LIMITE || 50);
+const LIMITE = Number(process.env.LIMITE_DLH || 50);
 const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
 const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
 const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
@@ -72,32 +78,18 @@ const METRICS_RETENTION_DAYS = Number(process.env.METRICS_RETENTION_DAYS || 90);
 const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
-const INVITE_REDIRECT_URL = process.env.INVITE_REDIRECT_URL || "";
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const CERTIFICADOS_LISTA_SELECT = [
-  "id",
-  "nome_original",
-  "nome_download",
-  "dlt",
-  "serie",
-  "data",
-  "certificado",
-  "status",
-  "validade",
-  "vencimento",
-  "mes_ano_validade",
-  "divergente",
-  "duplicado",
-  "serie_esperada",
-  "motivo_divergencia",
-  "criado_em"
+const CERTIFICADOS_DLH_LISTA_SELECT = [
+  "id", "nome_original", "nome_download", "dlh", "serie", "data",
+  "certificado", "status", "validade", "vencimento", "mes_ano_validade",
+  "divergente", "duplicado", "serie_esperada", "motivo_divergencia", "criado_em"
 ].join(",");
 
-let statusCache = { expiraEm: 0, valor: null };
-let idsBancoCache = { expiraEm: 0, valor: null };
-let idsExcluidosCache = { expiraEm: 0, valor: null };
-let syncLocalEmExecucao = false;
-let criteriosCache = { expiraEm: 0, valor: null };
+let statusCacheDLH = { expiraEm: 0, valor: null };
+let idsBancoCacheDLH = { expiraEm: 0, valor: null };
+let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
+let syncLocalDLHEmExecucao = false;
+let criteriosCacheDLH = { expiraEm: 0, valor: null };
 let metricasFlushEmExecucao = false;
 let ultimoSlotMetricas = "";
 let ultimaLimpezaMetricas = "";
@@ -210,6 +202,7 @@ app.use((req, res, next) => {
   next();
 });
 
+
 // =========================
 // GOOGLE DRIVE AUTH
 // =========================
@@ -291,17 +284,16 @@ function papeisPermitidos(req) {
   const rota = req.path;
   const metodo = req.method;
 
-  if (rota.startsWith("/metricas")) return ["dev"];
-  if (rota.startsWith("/usuarios")) return ["dev", "administrador"];
+  if (rota.startsWith("/dlh/metricas")) return ["dev"];
   if (
     metodo === "DELETE" ||
-    rota === "/sync" ||
-    rota === "/reprocess" ||
-    (rota === "/criterios" && metodo === "PATCH")
+    rota === "/dlh/sync" ||
+    rota === "/dlh/reprocess" ||
+    (rota === "/dlh/criterios" && metodo === "PATCH")
   ) {
     return ["dev", "administrador"];
   }
-  if (metodo === "POST" && rota.startsWith("/downloads/")) {
+  if (metodo === "POST" && rota.startsWith("/dlh/downloads/")) {
     return ["dev", "administrador", "usuario"];
   }
 
@@ -313,7 +305,7 @@ app.use(async (req, res, next) => {
     !AUTH_ENABLED ||
     req.method === "OPTIONS" ||
     req.path === "/" ||
-    req.path.startsWith("/automacao/")
+    req.path.startsWith("/dlh/automacao/")
   ) {
     return next();
   }
@@ -381,17 +373,13 @@ function dividirEmLotes(lista, tamanho = 100) {
   return lotes;
 }
 
-function invalidarCaches() {
-  statusCache = { expiraEm: 0, valor: null };
+function invalidarCachesDLH() {
+  statusCacheDLH = { expiraEm: 0, valor: null };
 }
 
 async function contarTabela(tabela) {
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?select=id`, {
-    headers: {
-      ...supabaseHeaders(),
-      Prefer: "count=exact",
-      Range: "0-0"
-    }
+    headers: { ...supabaseHeaders(), Prefer: "count=exact", Range: "0-0" }
   });
 
   if (!response.ok) {
@@ -401,139 +389,11 @@ async function contarTabela(tabela) {
     );
   }
 
-  const total = response.headers.get("content-range")?.split("/")[1];
-  return Number(total || 0);
-}
-
-async function buscarCriteriosCalibracao() {
-  if (criteriosCache.valor && criteriosCache.expiraEm > Date.now()) {
-    return criteriosCache.valor;
-  }
-
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.1&select=id,limite_dlt,atualizado_em`,
-    { headers: supabaseHeaders() }
-  );
-  const data = await response.json();
-  const registros = validarListaSupabase(response, data, "Supabase critérios DLT");
-  const criterios = {
-    limite_dlt: Number(registros[0]?.limite_dlt ?? 0.5),
-    atualizado_em: registros[0]?.atualizado_em || null
-  };
-
-  criteriosCache = { valor: criterios, expiraEm: Date.now() + CRITERIOS_CACHE_MS };
-  return criterios;
-}
-
-function minutosDoHorario(valor) {
-  const [hora, minuto] = String(valor).split(":").map(Number);
-  return hora * 60 + minuto;
-}
-
-function horarioLocalMetricas() {
-  const partes = new Intl.DateTimeFormat("en-CA", {
-    timeZone: METRICS_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(new Date());
-  const dados = Object.fromEntries(partes.map(p => [p.type, p.value]));
-
-  return {
-    data: `${dados.year}-${dados.month}-${dados.day}`,
-    minutos: Number(dados.hour) * 60 + Number(dados.minute)
-  };
-}
-
-function slotAtualMetricas() {
-  const agora = horarioLocalMetricas();
-  const inicio = minutosDoHorario(METRICS_START_TIME);
-  const fim = minutosDoHorario(METRICS_END_TIME);
-  if (agora.minutos < inicio || agora.minutos >= fim) return null;
-
-  const indice = Math.floor((agora.minutos - inicio) / METRICS_INTERVAL_MINUTES);
-  const slotMinutos = inicio + indice * METRICS_INTERVAL_MINUTES;
-  return `${agora.data}-${slotMinutos}`;
-}
-
-async function gravarMetricasConsolidadas() {
-  if (!METRICS_ENABLED || metricasFlushEmExecucao || metricas.requisicoes === 0) return;
-  metricasFlushEmExecucao = true;
-  const snapshot = metricas;
-  metricas = novasMetricas();
-
-  try {
-    const response = await fetchNative(`${SUPABASE_URL}/rest/v1/metricas_consumo`, {
-      method: "POST",
-      headers: supabaseHeaders(),
-      body: JSON.stringify({
-        servico: "DLT",
-        periodo_inicio: snapshot.periodo_inicio,
-        periodo_fim: new Date().toISOString(),
-        requisicoes: snapshot.requisicoes,
-        respostas_bytes: snapshot.respostas_bytes,
-        requisicoes_externas: snapshot.requisicoes_externas,
-        supabase_requisicoes: snapshot.supabase_requisicoes,
-        supabase_bytes: snapshot.supabase_bytes,
-        google_requisicoes: snapshot.google_requisicoes,
-        google_bytes: snapshot.google_bytes,
-        erros: snapshot.erros,
-        tempo_total_ms: snapshot.tempo_total_ms,
-        rotas: snapshot.rotas
-      })
-    });
-
-    if (!response.ok) throw new Error(await response.text());
-
-    const dataLocal = horarioLocalMetricas().data;
-    if (ultimaLimpezaMetricas !== dataLocal) {
-      ultimaLimpezaMetricas = dataLocal;
-      const limite = new Date(Date.now() - METRICS_RETENTION_DAYS * 86400000).toISOString();
-      await fetchNative(
-        `${SUPABASE_URL}/rest/v1/metricas_consumo?periodo_fim=lt.${encodeURIComponent(limite)}`,
-        { method: "DELETE", headers: supabaseHeaders() }
-      );
-    }
-  } catch (e) {
-    metricas.requisicoes += snapshot.requisicoes;
-    metricas.respostas_bytes += snapshot.respostas_bytes;
-    metricas.requisicoes_externas += snapshot.requisicoes_externas;
-    metricas.supabase_requisicoes += snapshot.supabase_requisicoes;
-    metricas.supabase_bytes += snapshot.supabase_bytes;
-    metricas.google_requisicoes += snapshot.google_requisicoes;
-    metricas.google_bytes += snapshot.google_bytes;
-    metricas.erros += snapshot.erros;
-    metricas.tempo_total_ms += snapshot.tempo_total_ms;
-    for (const [rota, valores] of Object.entries(snapshot.rotas)) {
-      const atual = metricas.rotas[rota] || {
-        requisicoes: 0, respostas_bytes: 0, erros: 0, tempo_total_ms: 0
-      };
-      for (const campo of Object.keys(atual)) atual[campo] += valores[campo] || 0;
-      metricas.rotas[rota] = atual;
-    }
-    console.log("Falha ao consolidar métricas DLT:", e.message);
-  } finally {
-    metricasFlushEmExecucao = false;
-  }
-}
-
-async function verificarAgendaMetricas() {
-  const slot = slotAtualMetricas();
-  if (!slot) return;
-  if (!ultimoSlotMetricas) {
-    ultimoSlotMetricas = slot;
-    return;
-  }
-  if (slot === ultimoSlotMetricas) return;
-
-  ultimoSlotMetricas = slot;
-  await gravarMetricasConsolidadas();
+  return Number(response.headers.get("content-range")?.split("/")[1] || 0);
 }
 
 function parseBR(v) {
+  if (v === null || v === undefined) return NaN;
   return parseFloat(String(v).replace(",", "."));
 }
 
@@ -541,73 +401,8 @@ function fmt2(n) {
   return Number(Number(n).toFixed(2));
 }
 
-function extrairDados(nome) {
-  const partes = nome.replace(".pdf", "").split("_");
-
-  return {
-    nome_original: nome,
-    dlt: partes[0]?.replace("DLT-", "") || "",
-    serie: partes[1] || "",
-    data: partes[2] ? partes[2].split(".").reverse().join("-") : ""
-  };
-}
-
 function soDigitos(texto) {
   return String(texto || "").replace(/\D/g, "");
-}
-
-function formatarDataBRparaISO(dataBR) {
-  const m = String(dataBR || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return "";
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
-function formatarDataISOParaNome(dataISO) {
-  if (!dataISO) return "";
-  const [ano, mes, dia] = dataISO.split("-");
-  if (!ano || !mes || !dia) return "";
-  return `${dia}.${mes}.${ano}`;
-}
-
-function formatarDataISOParaBR(dataISO) {
-  if (!dataISO) return "";
-  const [ano, mes, dia] = String(dataISO).split("-");
-  if (!ano || !mes || !dia) return String(dataISO);
-  return `${dia}/${mes}/${ano}`;
-}
-
-function formatarDataHoraBR(dataISO) {
-  if (!dataISO) return "";
-  const d = new Date(dataISO);
-  return d.toLocaleString("pt-BR");
-}
-
-function montarNomePadrao(dlt, serie, dataISO) {
-  const tag = normalizarDLT(dlt);
-  const dataFormatada = formatarDataISOParaNome(dataISO);
-
-  if (!tag || !serie || !dataFormatada) return null;
-  return `${tag}_${serie}_${dataFormatada}.pdf`;
-}
-
-function obterHojeISO() {
-  const hoje = new Date();
-  const ano = hoje.getFullYear();
-  const mes = String(hoje.getMonth() + 1).padStart(2, "0");
-  const dia = String(hoje.getDate()).padStart(2, "0");
-  return `${ano}-${mes}-${dia}`;
-}
-
-function mesmaData(dataIsoA, dataIsoB) {
-  return String(dataIsoA || "").slice(0, 10) === String(dataIsoB || "").slice(0, 10);
-}
-
-function escaparHtml(valor) {
-  return String(valor ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 
@@ -615,7 +410,7 @@ function escaparHtml(valor) {
 // =========================
 // FILTROS POR PERIODO / DOWNLOAD EM MASSA
 // =========================
-const downloadJobs = new Map();
+const downloadJobsDLH = new Map();
 
 function limparNomeArquivo(nome) {
   return String(nome || "certificado.pdf")
@@ -642,7 +437,7 @@ function normalizarDataQuery(valor) {
 
 function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamentos, testeInicio, testeFim }) {
   const params = new URLSearchParams();
-  params.set("select", CERTIFICADOS_LISTA_SELECT);
+  params.set("select", CERTIFICADOS_DLH_LISTA_SELECT);
   params.set(campoEquipamento, `in.(${equipamentos.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
   params.set("data", `lte.${testeFim}`);
   params.set("vencimento", `gte.${testeInicio}`);
@@ -667,7 +462,7 @@ async function buscarCertificadosPorPeriodoEmLotes({
 
   const normalizados = [...new Set(
     equipamentos
-      .map(normalizarDLT)
+      .map(normalizarDLH)
       .filter(Boolean)
   )];
 
@@ -862,14 +657,14 @@ async function baixarArquivoDriveComRetry(fileId, tentativas = 4) {
   throw ultimoErro;
 }
 
-async function salvarZipNoDrive(zipPath, nomeArquivo) {
+async function salvarZipNoDriveDLH(zipPath, nomeArquivo) {
   if (!drive) throw new Error("Credenciais Google Drive não configuradas");
-  if (!DOWNLOADS_FOLDER_ID) throw new Error("DOWNLOADS_FOLDER_ID, REPORTS_FOLDER_ID ou FOLDER_ID não configurado");
+  if (!DOWNLOADS_FOLDER_ID_DLH) throw new Error("DOWNLOADS_FOLDER_ID_DLH ou FOLDER_ID_DLH não configurado");
 
   const response = await drive.files.create({
     requestBody: {
       name: nomeArquivo,
-      parents: [DOWNLOADS_FOLDER_ID],
+      parents: [DOWNLOADS_FOLDER_ID_DLH],
       mimeType: "application/zip"
     },
     media: {
@@ -883,8 +678,8 @@ async function salvarZipNoDrive(zipPath, nomeArquivo) {
   return response.data;
 }
 
-async function criarZipNoDisco(registros, zipPath, job) {
-  const pastaTemporaria = await fs.promises.mkdtemp(path.join(os.tmpdir(), "certificados-dlt-"));
+async function criarZipNoDiscoDLH(registros, zipPath, job) {
+  const pastaTemporaria = await fs.promises.mkdtemp(path.join(os.tmpdir(), "certificados-dlh-"));
   const arquivos = [];
 
   try {
@@ -893,7 +688,7 @@ async function criarZipNoDisco(registros, zipPath, job) {
       try {
         const buffer = await baixarArquivoDriveComRetry(item.id);
         const nome = limparNomeArquivo(
-          item.nome_download || item.nome_original || `DLT_${item.id}.pdf`
+          item.nome_download || item.nome_original || `DLH_${item.id}.pdf`
         );
         const caminho = path.join(pastaTemporaria, `${String(index + 1).padStart(4, "0")}_${nome}`);
         await fs.promises.writeFile(caminho, buffer);
@@ -932,17 +727,17 @@ async function criarZipNoDisco(registros, zipPath, job) {
   }
 }
 
-async function processarDownloadMassa(jobId, registros) {
-  const job = downloadJobs.get(jobId);
+async function processarDownloadMassaDLH(jobId, registros) {
+  const job = downloadJobsDLH.get(jobId);
   job.status = "processando";
   job.total = registros.length;
   job.atualizado_em = new Date().toISOString();
 
-  const nomeArquivo = `CERTIFICADOS_DLT_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
+  const nomeArquivo = `CERTIFICADOS_DLH_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
   const zipPath = path.join(os.tmpdir(), nomeArquivo);
   try {
-    await criarZipNoDisco(registros, zipPath, job);
-    const arquivoDrive = await salvarZipNoDrive(zipPath, nomeArquivo);
+    await criarZipNoDiscoDLH(registros, zipPath, job);
+    const arquivoDrive = await salvarZipNoDriveDLH(zipPath, nomeArquivo);
 
     job.status = "concluido";
     job.arquivo_zip_nome = nomeArquivo;
@@ -952,6 +747,46 @@ async function processarDownloadMassa(jobId, registros) {
   } finally {
     await fs.promises.rm(zipPath, { force: true });
   }
+}
+
+function formatarDataBRparaISO(dataBR) {
+  const m = String(dataBR || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return "";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function formatarDataISOParaNome(dataISO) {
+  if (!dataISO) return "";
+  const [ano, mes, dia] = String(dataISO).split("-");
+  if (!ano || !mes || !dia) return "";
+  return `${dia}.${mes}.${ano}`;
+}
+
+function formatarDataISOParaBR(dataISO) {
+  if (!dataISO) return "";
+  const [ano, mes, dia] = String(dataISO).split("-");
+  if (!ano || !mes || !dia) return String(dataISO);
+  return `${dia}/${mes}/${ano}`;
+}
+
+function obterHojeISO() {
+  const hoje = new Date();
+  const ano = hoje.getFullYear();
+  const mes = String(hoje.getMonth() + 1).padStart(2, "0");
+  const dia = String(hoje.getDate()).padStart(2, "0");
+  return `${ano}-${mes}-${dia}`;
+}
+
+function mesmaData(dataIsoA, dataIsoB) {
+  return String(dataIsoA || "").slice(0, 10) === String(dataIsoB || "").slice(0, 10);
+}
+
+function montarNomePadrao(dlh, serie, dataISO) {
+  const tag = normalizarDLH(dlh);
+  const dataFormatada = formatarDataISOParaNome(dataISO);
+
+  if (!tag || !serie || !dataFormatada) return null;
+  return `${tag}_${serie}_${dataFormatada}.pdf`;
 }
 
 function verificarValidade(dataISO) {
@@ -970,18 +805,60 @@ function verificarValidade(dataISO) {
   };
 }
 
-function somenteNumeroBR(texto) {
-  return /^-?\d+,\d+$/.test((texto || "").trim());
+function extrairNumeroCertificado(texto) {
+  const match = String(texto || "").match(/LT\s*[-–]?\s*(\d{3})\s*(\d{3})/i);
+  if (!match) return "";
+  return `LT-${match[1]} ${match[2]}`;
 }
 
-function extrairNumeroCertificado(texto) {
-  if (!texto) return "";
+function extrairDadosNomeArquivo(nome) {
+  const base = String(nome || "").replace(".pdf", "");
+  const partes = base.split("_");
 
-  const match = String(texto).match(/LT\s*[-–]?\s*(\d{3})\s*(\d{3})/i);
+  return {
+    dlh: partes[0] ? normalizarDLH(partes[0]) : "",
+    serie: partes[1] ? soDigitos(partes[1]) : "",
+    data: partes[2] ? partes[2].split(".").reverse().join("-") : ""
+  };
+}
 
-  if (!match) return "";
+function avaliarDivergencia(dlh, serie) {
+  const tag = normalizarDLH(dlh);
+  const serieEsperada = tag ? MAPA_LOGGERS_DLH[tag] || null : null;
 
-  return `LT-${match[1]} ${match[2]}`;
+  if (!tag) {
+    return {
+      divergente: true,
+      serie_esperada: null,
+      motivo_divergencia: "DLH inválido"
+    };
+  }
+
+  if (!serieEsperada) {
+    return {
+      divergente: true,
+      serie_esperada: null,
+      motivo_divergencia: "DLH não encontrado na base"
+    };
+  }
+
+  if (String(serie).trim() !== String(serieEsperada).trim()) {
+    return {
+      divergente: true,
+      serie_esperada: serieEsperada,
+      motivo_divergencia: "Série divergente"
+    };
+  }
+
+  return {
+    divergente: false,
+    serie_esperada: serieEsperada,
+    motivo_divergencia: null
+  };
+}
+
+function somenteNumeroBR(texto) {
+  return /^-?\d+,\d+$|^-?\d+\.\d+$|^-?\d+$/.test(String(texto || "").trim());
 }
 
 function agruparLinhasPorY(items, tolerancia = 2.2) {
@@ -1007,422 +884,103 @@ function agruparLinhasPorY(items, tolerancia = 2.2) {
   return linhas.sort((a, b) => b.y - a.y);
 }
 
-function acharCabecalho(items, regex) {
-  return items.find(i => regex.test(i.text));
-}
-
-function numeroMaisProximoNaColuna(linha, xColuna, faixa = 30) {
-  const candidatos = linha.items.filter(
-    i => somenteNumeroBR(i.text) && Math.abs(i.x - xColuna) <= faixa
-  );
+function numeroNaFaixa(linha, xMin, xMax) {
+  const candidatos = linha.items.filter(i => {
+    return somenteNumeroBR(i.text) && i.x >= xMin && i.x <= xMax;
+  });
 
   if (!candidatos.length) return null;
 
-  candidatos.sort((a, b) => Math.abs(a.x - xColuna) - Math.abs(b.x - xColuna));
+  candidatos.sort((a, b) => a.x - b.x);
   return candidatos[0];
 }
 
-function avaliarDivergencia(dlt, serie) {
-  const tag = normalizarDLT(dlt);
-  const serieEsperada = tag ? MAPA_LOGGERS[tag] || null : null;
-
-  if (!tag) {
-    return {
-      divergente: true,
-      serie_esperada: null,
-      motivo_divergencia: "DLT inválido"
-    };
-  }
-
-  if (!serieEsperada) {
-    return {
-      divergente: true,
-      serie_esperada: null,
-      motivo_divergencia: "DLT não encontrado na base"
-    };
-  }
-
-  if (String(serie).trim() !== String(serieEsperada).trim()) {
-    return {
-      divergente: true,
-      serie_esperada: serieEsperada,
-      motivo_divergencia: "Série divergente"
-    };
-  }
-
-  return {
-    divergente: false,
-    serie_esperada: serieEsperada,
-    motivo_divergencia: null
-  };
+function numerosDaLinha(linha) {
+  return linha.items
+    .filter(i => somenteNumeroBR(i.text))
+    .sort((a, b) => a.x - b.x)
+    .map(i => ({
+      text: i.text,
+      valor: parseBR(i.text),
+      x: i.x,
+      y: i.y
+    }))
+    .filter(i => !Number.isNaN(i.valor));
 }
 
-function execucaoTravada(controle) {
-  if (!controle?.em_execucao || !controle?.ultima_execucao) return false;
+// =========================
+// DRIVE
+// =========================
+async function buscarArquivosDriveDLH() {
+  if (drive) {
+    const arquivos = [];
+    let pageToken = null;
 
-  const ultima = new Date(controle.ultima_execucao).getTime();
-  const agora = Date.now();
-
-  return agora - ultima > 5 * 60 * 1000;
-}
-
-function agruparRegistrosPorDLT(registros) {
-  const grupos = new Map();
-
-  for (const item of registros) {
-    const chave = item.dlt || "SEM_DLT";
-    if (!grupos.has(chave)) grupos.set(chave, []);
-    grupos.get(chave).push(item);
-  }
-
-  return [...grupos.entries()].sort((a, b) => a[0].localeCompare(b[0], "pt-BR"));
-}
-
-function montarLogoHtml() {
-  if (LOGO_URL) {
-    return `<img src="${escaparHtml(LOGO_URL)}" alt="Logo" style="height:48px; object-fit:contain;" />`;
-  }
-
-  return `
-    <div style="
-      width: 150px;
-      height: 48px;
-      border: 1px solid #1f4e79;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      color:#1f4e79;
-      font-weight:700;
-      font-size:20px;
-      letter-spacing:1px;
-    ">
-      ITA FRIA
-    </div>
-  `;
-}
-
-function montarHtmlRelatorioDia(registros, dataRelatorio, dma = 0.5) {
-  const grupos = agruparRegistrosPorDLT(registros);
-
-  const total = registros.length;
-  const aprovados = registros.filter(r => r.status === "APROVADO").length;
-  const reprovados = registros.filter(r => r.status === "REPROVADO").length;
-  const erros = registros.filter(r => r.status === "ERRO").length;
-
-  const secoes = grupos
-    .map(([dlt, itens]) => {
-      const linhas = itens
-        .map((c, index) => {
-          const pontos = Array.isArray(c.pontos) ? c.pontos : [];
-          const p1 = pontos[0] || {};
-          const p2 = pontos[1] || {};
-          const p3 = pontos[2] || {};
-          const p4 = pontos[3] || {};
-
-          return `
-            <tr>
-              <td>${index + 1}</td>
-              <td>${escaparHtml(c.serie)}</td>
-              <td>${escaparHtml(normalizarDLT(c.dlt) || c.dlt)}</td>
-              <td>${escaparHtml(formatarDataISOParaBR(c.data))}</td>
-              <td>${escaparHtml(c.mes_ano_validade || "")}</td>
-              <td>${escaparHtml(c.certificado || "")}</td>
-              <td>${escaparHtml(String(p1.incerteza ?? "-"))}</td>
-              <td>${escaparHtml(String(p1.erro ?? "-"))}</td>
-              <td>${escaparHtml(String(p1.soma ?? "-"))}</td>
-              <td>${escaparHtml(String(p2.erro ?? "-"))}</td>
-              <td>${escaparHtml(String(p2.soma ?? "-"))}</td>
-              <td>${escaparHtml(String(p3.erro ?? "-"))}</td>
-              <td>${escaparHtml(String(p3.soma ?? "-"))}</td>
-              <td>${escaparHtml(String(p4.erro ?? "-"))}</td>
-              <td>${escaparHtml(String(p4.soma ?? "-"))}</td>
-              <td class="${c.status === "APROVADO" ? "ok" : c.status === "REPROVADO" ? "bad" : "warn"}">
-                ${escaparHtml(c.status)}
-              </td>
-            </tr>
-          `;
+    do {
+      const response = await executarGoogleComRetry(() =>
+        drive.files.list({
+          q: `'${FOLDER_ID_DLH}' in parents and mimeType='application/pdf' and trashed=false`,
+          fields: "nextPageToken, files(id, name,mimeType)",
+          pageSize: 1000,
+          pageToken: pageToken || undefined,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true
         })
-        .join("");
+      );
 
-      return `
-        <section class="bloco">
-          <div class="subtitulo">DLT ${escaparHtml(dlt)} — ${itens.length} certificado(s)</div>
-          <table>
-            <thead>
-              <tr>
-                <th rowspan="2">Nº</th>
-                <th rowspan="2">Nº Série</th>
-                <th rowspan="2">TAG</th>
-                <th rowspan="2">Calibrado em</th>
-                <th rowspan="2">Validade</th>
-                <th rowspan="2">Certificado</th>
-                <th rowspan="2">Incerteza ± U</th>
-                <th colspan="2">-20,0°C</th>
-                <th colspan="2">0,0°C</th>
-                <th colspan="2">15,0°C</th>
-                <th colspan="2">60,0°C</th>
-                <th rowspan="2">Resultado</th>
-              </tr>
-              <tr>
-                <th>Erro</th>
-                <th>Resultado</th>
-                <th>Erro</th>
-                <th>Resultado</th>
-                <th>Erro</th>
-                <th>Resultado</th>
-                <th>Erro</th>
-                <th>Resultado</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${linhas}
-            </tbody>
-          </table>
-        </section>
-      `;
-    })
-    .join("");
+      arquivos.push(...(response.data.files || []));
+      pageToken = response.data.nextPageToken || null;
+    } while (pageToken);
 
-  return `
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-      <meta charset="UTF-8" />
-      <title>Relatório Diário 174T</title>
-      <style>
-        @page {
-          size: A4 landscape;
-          margin: 8mm;
-        }
-
-        body {
-          font-family: Arial, sans-serif;
-          font-size: 9px;
-          color: #000;
-          margin: 0;
-        }
-
-        .pagina {
-          width: 100%;
-        }
-
-        .header-box {
-          border: 1px solid #000;
-          padding: 4px 6px;
-          margin-bottom: 5px;
-        }
-
-        .header-top {
-          display: grid;
-          grid-template-columns: 180px 1fr 180px;
-          align-items: center;
-          gap: 8px;
-          border-bottom: 1px solid #000;
-          padding-bottom: 5px;
-          margin-bottom: 5px;
-        }
-
-        .versao {
-          font-size: 9px;
-          line-height: 1.35;
-        }
-
-        .titulo {
-          text-align: center;
-          font-weight: 700;
-          font-size: 12px;
-        }
-
-        .meta-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr 1fr 1fr;
-          gap: 0;
-          border: 1px solid #000;
-          margin-top: 5px;
-        }
-
-        .meta-grid > div {
-          border-right: 1px solid #000;
-          padding: 3px 5px;
-        }
-
-        .meta-grid > div:last-child {
-          border-right: 0;
-        }
-
-        .resumo {
-          display: grid;
-          grid-template-columns: repeat(4, 1fr);
-          gap: 5px;
-          margin: 6px 0;
-        }
-
-        .card {
-          border: 1px solid #000;
-          padding: 4px;
-          text-align: center;
-        }
-
-        .card .n {
-          font-size: 14px;
-          font-weight: 700;
-        }
-
-        .subtitulo {
-          font-size: 10px;
-          font-weight: 700;
-          margin: 8px 0 3px;
-        }
-
-        table {
-          width: 100%;
-          border-collapse: collapse;
-          table-layout: fixed;
-          margin-bottom: 8px;
-        }
-
-        th, td {
-          border: 1px solid #000;
-          padding: 2px 3px;
-          text-align: center;
-          vertical-align: middle;
-          word-wrap: break-word;
-        }
-
-        th {
-          background: #f0f0f0;
-          font-size: 8px;
-        }
-
-        td {
-          font-size: 8px;
-        }
-
-        .ok {
-          color: #0a7a1f;
-          font-weight: 700;
-        }
-
-        .bad {
-          color: #b00020;
-          font-weight: 700;
-        }
-
-        .warn {
-          color: #9a6a00;
-          font-weight: 700;
-        }
-
-        .rodape {
-          margin-top: 6px;
-          display: flex;
-          justify-content: space-between;
-          font-size: 8px;
-        }
-
-        .bloco {
-          page-break-inside: avoid;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="pagina">
-        <div class="header-box">
-          <div class="header-top">
-            <div class="versao">
-              <div><strong>REL 06G009</strong></div>
-              <div>Versão: 00</div>
-              <div>Data: ${escaparHtml(formatarDataISOParaBR(dataRelatorio))}</div>
-            </div>
-
-            <div class="titulo">
-              AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTE 174T
-            </div>
-
-            <div style="display:flex;justify-content:flex-end;">
-              ${montarLogoHtml()}
-            </div>
-          </div>
-
-          <div class="meta-grid">
-            <div><strong>Instrumento:</strong> TESTO</div>
-            <div><strong>Modelo:</strong> 174T</div>
-            <div><strong>DMA:</strong> ${escaparHtml(String(dma).replace(".", ","))}</div>
-            <div><strong>Unidade:</strong> °C</div>
-          </div>
-        </div>
-
-        <div class="resumo">
-          <div class="card">
-            <div>Total processados</div>
-            <div class="n">${total}</div>
-          </div>
-          <div class="card">
-            <div>Aprovados</div>
-            <div class="n">${aprovados}</div>
-          </div>
-          <div class="card">
-            <div>Reprovados</div>
-            <div class="n">${reprovados}</div>
-          </div>
-          <div class="card">
-            <div>Erros</div>
-            <div class="n">${erros}</div>
-          </div>
-        </div>
-
-        ${secoes || `<div class="subtitulo">Nenhum processamento encontrado para ${escaparHtml(formatarDataISOParaBR(dataRelatorio))}.</div>`}
-
-        <div class="rodape">
-          <div>Sistema de Gestão da Qualidade ITA FRIA</div>
-          <div>Emitido em ${escaparHtml(formatarDataHoraBR(new Date().toISOString()))}</div>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
-}
-
-async function salvarRelatorioNoDrive(pdfPath, nomeArquivo) {
-  if (!drive) {
-    throw new Error("Credenciais Google Drive não configuradas");
+    return arquivos;
   }
 
-  if (!REPORTS_FOLDER_ID) {
-    throw new Error("REPORTS_FOLDER_ID não configurado");
-  }
+  const arquivos = [];
+  let pageToken = null;
 
-  const response = await drive.files.create({
-    requestBody: {
-      name: nomeArquivo,
-      parents: [REPORTS_FOLDER_ID],
-      mimeType: "application/pdf"
-    },
-    media: {
-      mimeType: "application/pdf",
-      body: fs.createReadStream(pdfPath)
-    },
-    fields: "id, webViewLink, webContentLink, name"
-  });
+  do {
+    const url =
+      `https://www.googleapis.com/drive/v3/files` +
+      `?q='${FOLDER_ID_DLH}'+in+parents+and+mimeType='application/pdf'+and+trashed=false` +
+      `&key=${GOOGLE_API_KEY}` +
+      `&fields=nextPageToken,files(id,name,mimeType)` +
+      `&pageSize=1000` +
+      `&supportsAllDrives=true` +
+      `&includeItemsFromAllDrives=true` +
+      `${pageToken ? `&pageToken=${pageToken}` : ""}`;
 
-  return response.data;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.error) {
+      throw new Error(data.error.message || "Erro ao buscar arquivos no Google Drive");
+    }
+
+    arquivos.push(...(data.files || []));
+    pageToken = data.nextPageToken || null;
+  } while (pageToken);
+
+  return arquivos;
 }
 
-// =========================
-// PDF / TEXTO
-// =========================
 async function baixarArquivoDrive(fileId) {
   if (drive) {
     const response = await drive.files.get(
-      { fileId, alt: "media", supportsAllDrives: true },
-      { responseType: "arraybuffer" }
+      {
+        fileId,
+        alt: "media",
+        supportsAllDrives: true
+      },
+      {
+        responseType: "arraybuffer"
+      }
     );
+
     return Buffer.from(response.data);
   }
 
-  const url =
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}` +
-    `?alt=media&key=${encodeURIComponent(GOOGLE_API_KEY)}&supportsAllDrives=true`;
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}&supportsAllDrives=true`;
+
   const res = await fetch(url);
 
   if (!res.ok) {
@@ -1432,6 +990,9 @@ async function baixarArquivoDrive(fileId) {
   return Buffer.from(await res.arrayBuffer());
 }
 
+// =========================
+// PDF
+// =========================
 async function extrairTextoELinhasDoPDF(buffer) {
   const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
   const page = await pdf.getPage(1);
@@ -1451,50 +1012,56 @@ async function extrairTextoELinhasDoPDF(buffer) {
   return { texto, items, linhas };
 }
 
-function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
-  let dlt = "";
+function extrairMetadadosDLH(texto) {
+  let dlh = "";
   let serie = "";
   let data = "";
   let certificado = "";
 
-  let m = texto.match(/(\d{8})\s+DLT-(\d{4})/i);
+  const textoStr = String(texto || "");
+
+  let m = textoStr.match(/Número de Série:\s*(\d{6,10})/i);
   if (m) {
     serie = m[1];
-    dlt = m[2];
   }
 
-  if (!dlt || !serie) {
-    m = texto.match(/DLT-(\d{4})\s+(\d{8})/i);
+  if (!serie) {
+    m = textoStr.match(/(\d{6,10})\s+DLH[-\s]?(\d{4})/i);
     if (m) {
-      dlt = m[1];
-      serie = m[2];
+      serie = m[1];
+      dlh = `DLH-${m[2]}`;
     }
   }
 
-  let dataMatch = null;
-  const idx = texto.search(/Data da Calibração/i);
-  if (idx >= 0) {
-    const trecho = texto.slice(idx, idx + 400);
-    dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
+  if (!dlh) {
+    m = textoStr.match(/DLH[-\s]?(\d{4})/i);
+    if (m) {
+      dlh = `DLH-${m[1]}`;
+    }
   }
 
-  if (!dataMatch) {
-    dataMatch = texto.match(/(\d{2}\/\d{2}\/\d{4})/);
+  const idxData = textoStr.search(/Data da Calibração/i);
+
+  if (idxData >= 0) {
+    const trecho = textoStr.slice(idxData, idxData + 500);
+    const dataMatch = trecho.match(/(\d{2}\/\d{2}\/\d{4})/);
+
+    if (dataMatch) {
+      data = formatarDataBRparaISO(dataMatch[1]);
+    }
   }
 
-  if (dataMatch) {
-    data = formatarDataBRparaISO(dataMatch[1]);
+  if (!data) {
+    const dataMatch = textoStr.match(/(\d{2}\/\d{2}\/\d{4})/);
+    if (dataMatch) {
+      data = formatarDataBRparaISO(dataMatch[1]);
+    }
   }
 
-  certificado = extrairNumeroCertificado(texto);
-
-  const baseNome = extrairDados(nomeOriginal);
-  if (!dlt && baseNome.dlt) dlt = soDigitos(baseNome.dlt).padStart(4, "0");
-  if (!serie && baseNome.serie) serie = soDigitos(baseNome.serie);
-  if (!data && baseNome.data) data = baseNome.data;
+  certificado = extrairNumeroCertificado(textoStr);
 
   return {
-    dlt: dlt ? soDigitos(dlt).padStart(4, "0") : "",
+    dlh: dlh ? soDigitos(dlh).padStart(4, "0") : "",
     serie: serie ? soDigitos(serie) : "",
     data: data || "",
     certificado: certificado || ""
@@ -1502,578 +1069,915 @@ function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
 }
 
 // =========================
-// LEITURA DA TABELA DO PDF
+// EXTRAÇÃO TABELA DLH
 // =========================
-async function extrairTabelaPorColunas(buffer) {
-  const { items, linhas } = await extrairTextoELinhasDoPDF(buffer);
+async function extrairTabelaDLH(buffer) {
+  const { texto, linhas } = await extrairTextoELinhasDoPDF(buffer);
 
-  const cabAquecimento = acharCabecalho(items, /^Aquecimento$/i);
-  const cabErro = acharCabecalho(items, /^Erro$/i);
-  const cabIncerteza = acharCabecalho(items, /Medição Expandida/i);
+  const textoCompleto = String(texto || "");
+  const textoLinhas = textoCompleto
+    .split(/\n+/)
+    .map(l => String(l || "").trim())
+    .filter(Boolean);
 
-  if (!cabAquecimento || !cabErro || !cabIncerteza) {
-    return {
-      ok: false,
-      debug: {
-        motivo: "Cabeçalhos não encontrados",
-        aquecimento: !!cabAquecimento,
-        erro: !!cabErro,
-        incerteza: !!cabIncerteza
-      }
-    };
+  const pontosUmidade = [];
+  const pontosTemperatura = [];
+
+  const padroesUmidade = [10, 50, 90];
+  const padroesTemperatura = [-20, 0, 15, 60];
+
+  function extrairNumeros(textoLinha) {
+    return (String(textoLinha || "").match(/-?\d+(?:[,.]\d+)?/g) || [])
+      .map(v => parseBR(v))
+      .filter(v => !Number.isNaN(v));
   }
 
-  const xAquecimento = cabAquecimento.x;
-  const xErro = cabErro.x;
-  const xIncerteza = cabIncerteza.x;
-  const yTopoTabela = Math.max(cabAquecimento.y, cabErro.y, cabIncerteza.y);
+  function adicionarUmidade(valores) {
+    if (pontosUmidade.length >= 3) return false;
+    if (!Array.isArray(valores) || valores.length < 3) return false;
 
-  const linhasDados = linhas.filter(l => l.y < yTopoTabela - 3);
-  const candidatos = [];
+    const padraoNum = padroesUmidade[pontosUmidade.length];
+    const indicadoNum = valores[0];
 
-  for (const linha of linhasDados) {
-    const aq = numeroMaisProximoNaColuna(linha, xAquecimento, 35);
-    const er = numeroMaisProximoNaColuna(linha, xErro, 35);
-    const inc = numeroMaisProximoNaColuna(linha, xIncerteza, 45);
+    let erroNum;
+    let incertezaNum;
 
-    if (!aq || !er || !inc) continue;
+    // Formato do texto extraído pelo pdfjs:
+    // indicado | erro | incerteza | k
+    // Exemplo: 14,0 4,0 0,4 2,00
+    erroNum = valores[1];
+    incertezaNum = valores[2];
 
-    const aquecimento = parseBR(aq.text);
-    const erro = Math.abs(parseBR(er.text));
-    const incerteza = Math.abs(parseBR(inc.text));
+    const coerenteCurto = Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.5;
 
-    if (Number.isNaN(aquecimento) || Number.isNaN(erro) || Number.isNaN(incerteza)) continue;
-    if (aquecimento < -100 || aquecimento > 200) continue;
-    if (erro > 2 || incerteza > 2) continue;
+    // Formato completo, quando o PDF preserva todas as colunas:
+    // indicado | padrão | erro | temperatura ref. | incerteza | k
+    // Exemplo: 14,0 10,0 4,0 20 0,4 2,00
+    if (!coerenteCurto && valores.length >= 5 && Math.round(valores[1]) === padraoNum) {
+      erroNum = valores[2];
+      incertezaNum = valores[4];
+    }
 
-    candidatos.push({
-      y: linha.y,
-      aquecimento: fmt2(aquecimento),
-      erro: fmt2(erro),
-      incerteza: fmt2(incerteza),
-      texto: linha.texto
+    const coerente =
+      Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.5 &&
+      indicadoNum >= 0 &&
+      indicadoNum <= 100 &&
+      Math.abs(erroNum) <= 20 &&
+      Math.abs(incertezaNum) <= 10;
+
+    if (!coerente) return false;
+
+    pontosUmidade.push({
+      ponto: pontosUmidade.length + 1,
+      indicado: fmt2(indicadoNum),
+      padrao: fmt2(padraoNum),
+      erro: fmt2(erroNum),
+      incerteza: fmt2(Math.abs(incertezaNum)),
+      soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
     });
+
+    return true;
   }
 
-  const vistos = new Set();
-  const unicos = [];
+  function adicionarTemperatura(valores) {
+    if (pontosTemperatura.length >= 4) return false;
+    if (!Array.isArray(valores) || valores.length < 2) return false;
 
-  for (const c of candidatos.sort((a, b) => b.y - a.y)) {
-    const chave = c.aquecimento.toFixed(2);
-    if (!vistos.has(chave)) {
-      vistos.add(chave);
-      unicos.push(c);
+    const padraoNum = padroesTemperatura[pontosTemperatura.length];
+    const indicadoNum = valores[0];
+
+    let erroNum;
+    let incertezaNum;
+
+    // Formato do texto extraído pelo pdfjs:
+    // indicado | incerteza | k
+    // Exemplo: -19,9 0,2 2,00
+    incertezaNum = valores[1];
+    erroNum = fmt2(indicadoNum - padraoNum);
+
+    // Formato completo:
+    // indicado | padrão | erro | incerteza | k
+    // Exemplo: -19,9 -20,0 0,1 0,2 2,00
+    if (valores.length >= 4 && Math.round(valores[1]) === padraoNum) {
+      erroNum = valores[2];
+      incertezaNum = valores[3];
+    }
+
+    const coerente =
+      indicadoNum >= -40 &&
+      indicadoNum <= 80 &&
+      Math.abs(erroNum) <= 5 &&
+      Math.abs(incertezaNum) <= 5;
+
+    if (!coerente) return false;
+
+    pontosTemperatura.push({
+      ponto: pontosTemperatura.length + 1,
+      indicado: fmt2(indicadoNum),
+      padrao: fmt2(padraoNum),
+      erro: fmt2(erroNum),
+      incerteza: fmt2(Math.abs(incertezaNum)),
+      soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+    });
+
+    return true;
+  }
+
+  // =====================================================
+  // LEITURA PRINCIPAL POR TEXTO EXTRAÍDO
+  // Funciona para o modelo Escala:
+  //
+  // Teste (%u.r.) ...
+  // 14,0 4,0 0,4 2,00 ∞
+  // 51,0 1,0 0,8 2,00 ∞
+  // 86,5 -3,5 1,5 2,00 ∞
+  //
+  // Teste (ºC) ...
+  // -19,9 0,2 2,00 ∞
+  // 0,0 0,2 2,00 ∞
+  // 14,9 0,2 2,00 ∞
+  // 59,7 0,2 2,00 ∞
+  // =====================================================
+
+  let modo = "";
+
+  for (const linha of textoLinhas) {
+    const upper = linha.toUpperCase();
+
+    if (
+      upper.includes("TESTE (%U.R.)") ||
+      upper.includes("TESTE (% U.R.)") ||
+      upper.includes("TESTE (%UR)") ||
+      (upper.includes("TESTE") && upper.includes("U.R"))
+    ) {
+      modo = "UMIDADE";
+      continue;
+    }
+
+    if (
+      upper.includes("TESTE (ºC)") ||
+      upper.includes("TESTE (°C)") ||
+      upper.includes("TESTE (OC)") ||
+      (upper.includes("TESTE") && (upper.includes("ºC") || upper.includes("°C")))
+    ) {
+      modo = "TEMPERATURA";
+      continue;
+    }
+
+    if (
+      upper.includes("A INCERTEZA") ||
+      upper.includes("OBSERVAÇÕES") ||
+      upper.includes("OBSERVACOES") ||
+      upper.includes("DATA DA CALIBRAÇÃO") ||
+      upper.includes("DATA DA CALIBRACAO")
+    ) {
+      modo = "";
+    }
+
+    const valores = extrairNumeros(linha);
+
+    if (modo === "UMIDADE" && pontosUmidade.length < 3) {
+      adicionarUmidade(valores);
+      continue;
+    }
+
+    if (modo === "TEMPERATURA" && pontosTemperatura.length < 4) {
+      adicionarTemperatura(valores);
+      continue;
     }
   }
 
-  const pontosOrdenados = unicos
-    .sort((a, b) => a.aquecimento - b.aquecimento)
-    .slice(0, 4);
+  // =====================================================
+  // FALLBACK POR LINHAS AGRUPADAS
+  // Caso textoCompleto venha diferente, usa as linhas do pdfjs
+  // =====================================================
 
-  if (pontosOrdenados.length < 4) {
+  if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
+    const backupUmidade = [];
+    const backupTemperatura = [];
+    let modoLinha = "";
+
+    function pushBackupUmidade(valores) {
+      if (backupUmidade.length >= 3 || valores.length < 3) return false;
+
+      const padraoNum = padroesUmidade[backupUmidade.length];
+      const indicadoNum = valores[0];
+
+      let erroNum = valores[1];
+      let incertezaNum = valores[2];
+
+      if (Math.abs((indicadoNum - padraoNum) - erroNum) > 1.5 && valores.length >= 5 && Math.round(valores[1]) === padraoNum) {
+        erroNum = valores[2];
+        incertezaNum = valores[4];
+      }
+
+      const ok =
+        indicadoNum >= 0 &&
+        indicadoNum <= 100 &&
+        Math.abs(erroNum) <= 20 &&
+        Math.abs(incertezaNum) <= 10 &&
+        Math.abs((indicadoNum - padraoNum) - erroNum) <= 1.5;
+
+      if (!ok) return false;
+
+      backupUmidade.push({
+        ponto: backupUmidade.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
+
+      return true;
+    }
+
+    function pushBackupTemperatura(valores) {
+      if (backupTemperatura.length >= 4 || valores.length < 2) return false;
+
+      const padraoNum = padroesTemperatura[backupTemperatura.length];
+      const indicadoNum = valores[0];
+
+      let erroNum = fmt2(indicadoNum - padraoNum);
+      let incertezaNum = valores[1];
+
+      if (valores.length >= 4 && Math.round(valores[1]) === padraoNum) {
+        erroNum = valores[2];
+        incertezaNum = valores[3];
+      }
+
+      const ok =
+        indicadoNum >= -40 &&
+        indicadoNum <= 80 &&
+        Math.abs(erroNum) <= 5 &&
+        Math.abs(incertezaNum) <= 5;
+
+      if (!ok) return false;
+
+      backupTemperatura.push({
+        ponto: backupTemperatura.length + 1,
+        indicado: fmt2(indicadoNum),
+        padrao: fmt2(padraoNum),
+        erro: fmt2(erroNum),
+        incerteza: fmt2(Math.abs(incertezaNum)),
+        soma: fmt2(Math.abs(erroNum) + Math.abs(incertezaNum))
+      });
+
+      return true;
+    }
+
+    for (const linha of linhas) {
+      const linhaTexto = String(linha.texto || "");
+      const upper = linhaTexto.toUpperCase();
+
+      if (
+        upper.includes("TESTE (%U.R.)") ||
+        upper.includes("TESTE (% U.R.)") ||
+        (upper.includes("TESTE") && upper.includes("U.R"))
+      ) {
+        modoLinha = "UMIDADE";
+        continue;
+      }
+
+      if (
+        upper.includes("TESTE (ºC)") ||
+        upper.includes("TESTE (°C)") ||
+        (upper.includes("TESTE") && (upper.includes("ºC") || upper.includes("°C")))
+      ) {
+        modoLinha = "TEMPERATURA";
+        continue;
+      }
+
+      if (
+        upper.includes("A INCERTEZA") ||
+        upper.includes("OBSERVAÇÕES") ||
+        upper.includes("OBSERVACOES") ||
+        upper.includes("DATA DA CALIBRAÇÃO") ||
+        upper.includes("DATA DA CALIBRACAO")
+      ) {
+        modoLinha = "";
+      }
+
+      const valores = extrairNumeros(linhaTexto);
+
+      if (modoLinha === "UMIDADE") {
+        pushBackupUmidade(valores);
+      }
+
+      if (modoLinha === "TEMPERATURA") {
+        pushBackupTemperatura(valores);
+      }
+    }
+
+    if (pontosUmidade.length < 3 && backupUmidade.length >= 3) {
+      pontosUmidade.length = 0;
+      pontosUmidade.push(...backupUmidade.slice(0, 3));
+    }
+
+    if (pontosTemperatura.length < 4 && backupTemperatura.length >= 4) {
+      pontosTemperatura.length = 0;
+      pontosTemperatura.push(...backupTemperatura.slice(0, 4));
+    }
+  }
+
+  if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
     return {
       ok: false,
+      pontos_umidade: pontosUmidade,
+      pontos_temperatura: pontosTemperatura,
       debug: {
-        motivo: "Menos de 4 linhas válidas",
-        xAquecimento,
-        xErro,
-        xIncerteza,
-        candidatos: candidatos.map(c => ({
-          aquecimento: c.aquecimento,
-          erro: c.erro,
-          incerteza: c.incerteza,
-          texto: c.texto
-        }))
+        motivo: "Quantidade insuficiente de pontos DLH",
+        umidade_encontrada: pontosUmidade.length,
+        temperatura_encontrada: pontosTemperatura.length,
+        texto: textoCompleto,
+        linhas: linhas.map(l => l.texto)
       }
     };
   }
 
-  const pontos = pontosOrdenados.map((p, idx) => ({
-    ponto: idx + 1,
-    aquecimento: p.aquecimento,
-    erro: p.erro,
-    incerteza: p.incerteza,
-    soma: fmt2(p.erro + p.incerteza)
-  }));
+  return {
+    ok: true,
+    pontos_umidade: pontosUmidade,
+    pontos_temperatura: pontosTemperatura
+  };
+}
 
-  return { ok: true, pontos };
+
+// =========================
+// CRITÉRIOS DE ACEITAÇÃO
+// =========================
+async function buscarCriteriosCalibracao() {
+  if (criteriosCacheDLH.valor && criteriosCacheDLH.expiraEm > Date.now()) {
+    return criteriosCacheDLH.valor;
+  }
+
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.1&select=id,limite_temperatura,limite_umidade,atualizado_em`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+    const registros = validarListaSupabase(r, data, "Supabase critérios DLH");
+    const criterios = {
+      limite_temperatura: Number(data[0].limite_temperatura ?? 0.5),
+      limite_umidade: Number(data[0].limite_umidade ?? 5.0),
+      atualizado_em: data[0].atualizado_em || null
+    };
+
+    criteriosCacheDLH = {
+      valor: criterios,
+      expiraEm: Date.now() + CRITERIOS_CACHE_MS
+    };
+    return criterios;
+  } catch (e) {
+    console.log("Erro ao buscar critérios de calibração, usando padrão:", e.message);
+
+    return {
+      limite_temperatura: 0.5,
+      limite_umidade: 5.0
+    };
+  }
+}
+
+function minutosDoHorario(valor) {
+  const [hora, minuto] = String(valor).split(":").map(Number);
+  return hora * 60 + minuto;
+}
+
+function horarioLocalMetricas() {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: METRICS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  const dados = Object.fromEntries(partes.map(p => [p.type, p.value]));
+
+  return {
+    data: `${dados.year}-${dados.month}-${dados.day}`,
+    minutos: Number(dados.hour) * 60 + Number(dados.minute)
+  };
+}
+
+function slotAtualMetricas() {
+  const agora = horarioLocalMetricas();
+  const inicio = minutosDoHorario(METRICS_START_TIME);
+  const fim = minutosDoHorario(METRICS_END_TIME);
+  if (agora.minutos < inicio || agora.minutos >= fim) return null;
+
+  const indice = Math.floor((agora.minutos - inicio) / METRICS_INTERVAL_MINUTES);
+  const slotMinutos = inicio + indice * METRICS_INTERVAL_MINUTES;
+  return `${agora.data}-${slotMinutos}`;
+}
+
+async function gravarMetricasConsolidadas() {
+  if (!METRICS_ENABLED || metricasFlushEmExecucao || metricas.requisicoes === 0) return;
+  metricasFlushEmExecucao = true;
+  const snapshot = metricas;
+  metricas = novasMetricas();
+
+  try {
+    const response = await fetchNative(`${SUPABASE_URL}/rest/v1/metricas_consumo`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        servico: "DLH",
+        periodo_inicio: snapshot.periodo_inicio,
+        periodo_fim: new Date().toISOString(),
+        requisicoes: snapshot.requisicoes,
+        respostas_bytes: snapshot.respostas_bytes,
+        requisicoes_externas: snapshot.requisicoes_externas,
+        supabase_requisicoes: snapshot.supabase_requisicoes,
+        supabase_bytes: snapshot.supabase_bytes,
+        google_requisicoes: snapshot.google_requisicoes,
+        google_bytes: snapshot.google_bytes,
+        erros: snapshot.erros,
+        tempo_total_ms: snapshot.tempo_total_ms,
+        rotas: snapshot.rotas
+      })
+    });
+
+    if (!response.ok) throw new Error(await response.text());
+
+    const dataLocal = horarioLocalMetricas().data;
+    if (ultimaLimpezaMetricas !== dataLocal) {
+      ultimaLimpezaMetricas = dataLocal;
+      const limite = new Date(Date.now() - METRICS_RETENTION_DAYS * 86400000).toISOString();
+      await fetchNative(
+        `${SUPABASE_URL}/rest/v1/metricas_consumo?periodo_fim=lt.${encodeURIComponent(limite)}`,
+        { method: "DELETE", headers: supabaseHeaders() }
+      );
+    }
+  } catch (e) {
+    metricas.requisicoes += snapshot.requisicoes;
+    metricas.respostas_bytes += snapshot.respostas_bytes;
+    metricas.requisicoes_externas += snapshot.requisicoes_externas;
+    metricas.supabase_requisicoes += snapshot.supabase_requisicoes;
+    metricas.supabase_bytes += snapshot.supabase_bytes;
+    metricas.google_requisicoes += snapshot.google_requisicoes;
+    metricas.google_bytes += snapshot.google_bytes;
+    metricas.erros += snapshot.erros;
+    metricas.tempo_total_ms += snapshot.tempo_total_ms;
+    for (const [rota, valores] of Object.entries(snapshot.rotas)) {
+      const atual = metricas.rotas[rota] || {
+        requisicoes: 0, respostas_bytes: 0, erros: 0, tempo_total_ms: 0
+      };
+      for (const campo of Object.keys(atual)) atual[campo] += valores[campo] || 0;
+      metricas.rotas[rota] = atual;
+    }
+    console.log("Falha ao consolidar métricas DLH:", e.message);
+  } finally {
+    metricasFlushEmExecucao = false;
+  }
+}
+
+async function verificarAgendaMetricas() {
+  const slot = slotAtualMetricas();
+  if (!slot) return;
+  if (!ultimoSlotMetricas) {
+    ultimoSlotMetricas = slot;
+    return;
+  }
+  if (slot === ultimoSlotMetricas) return;
+
+  ultimoSlotMetricas = slot;
+  await gravarMetricasConsolidadas();
+}
+
+function avaliarStatusDLH(pontosUmidade = [], pontosTemperatura = [], criterios = {}) {
+  const limiteTemperatura = Number(criterios.limite_temperatura ?? 0.5);
+  const limiteUmidade = Number(criterios.limite_umidade ?? 5.0);
+
+  const umidadeOk = (Array.isArray(pontosUmidade) ? pontosUmidade : []).every(
+    p => Number(p.soma) <= limiteUmidade
+  );
+
+  const temperaturaOk = (Array.isArray(pontosTemperatura) ? pontosTemperatura : []).every(
+    p => Number(p.soma) <= limiteTemperatura
+  );
+
+  return {
+    aprovado: umidadeOk && temperaturaOk,
+    umidade_ok: umidadeOk,
+    temperatura_ok: temperaturaOk,
+    limite_temperatura: limiteTemperatura,
+    limite_umidade: limiteUmidade
+  };
 }
 
 // =========================
-// PROCESSAMENTO PRINCIPAL
+// PROCESSAMENTO
 // =========================
-async function processarPDF(fileId) {
+async function processarPDFDLH(fileId, nomeArquivo = "") {
   try {
     const buffer = await baixarArquivoDrive(fileId);
     const { texto } = await extrairTextoELinhasDoPDF(buffer);
-    const meta = extrairMetadadosDoTexto(texto);
-    const tabela = await extrairTabelaPorColunas(buffer);
+
+    const meta = extrairMetadadosDLH(texto);
+    const fallbackNome = extrairDadosNomeArquivo(nomeArquivo);
+
+    if (!meta.dlh && fallbackNome.dlh) meta.dlh = soDigitos(fallbackNome.dlh).padStart(4, "0");
+    if (!meta.serie && fallbackNome.serie) meta.serie = fallbackNome.serie;
+    if (!meta.data && fallbackNome.data) meta.data = fallbackNome.data;
+
+    const tabela = await extrairTabelaDLH(buffer);
 
     if (!tabela.ok) {
       return {
         status: "ERRO",
-        pontos: [],
+        pontos_umidade: tabela.pontos_umidade || [],
+        pontos_temperatura: tabela.pontos_temperatura || [],
         certificado: meta.certificado || "",
-        debug: tabela.debug || {}
+        meta,
+        debug: tabela.debug
       };
     }
 
     const criterios = await buscarCriteriosCalibracao();
-    const aprovado = tabela.pontos.every(p => p.soma <= criterios.limite_dlt);
+    const avaliacao = avaliarStatusDLH(
+      tabela.pontos_umidade,
+      tabela.pontos_temperatura,
+      criterios
+    );
 
     return {
-      status: aprovado ? "APROVADO" : "REPROVADO",
-      pontos: tabela.pontos,
+      status: avaliacao.aprovado ? "APROVADO" : "REPROVADO",
+      pontos_umidade: tabela.pontos_umidade,
+      pontos_temperatura: tabela.pontos_temperatura,
       certificado: meta.certificado || "",
-      criterios_aceitacao: criterios
+      criterios_aceitacao: {
+        limite_temperatura: avaliacao.limite_temperatura,
+        limite_umidade: avaliacao.limite_umidade
+      },
+      avaliacao,
+      meta
     };
   } catch (e) {
     return {
       status: "ERRO",
-      pontos: [],
+      pontos_umidade: [],
+      pontos_temperatura: [],
       certificado: "",
+      meta: {},
       debug: { erro: e.message }
     };
   }
 }
 
 // =========================
-// CONTROLE / HISTÓRICO
+// BANCO
 // =========================
-async function atualizarControleSync(payload) {
+async function buscarIdsBancoDLH() {
+  if (idsBancoCacheDLH.valor && idsBancoCacheDLH.expiraEm > Date.now()) {
+    return idsBancoCacheDLH.valor;
+  }
+
+  const ids = new Set();
+  const limit = 1000;
+  let offset = 0;
+
+  while (true) {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id&limit=${limit}&offset=${offset}`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+    validarListaSupabase(r, data, "Supabase certificados_dlh");
+
+    if (!Array.isArray(data) || data.length === 0) break;
+
+    for (const item of data) {
+      ids.add(item.id);
+    }
+
+    if (data.length < limit) break;
+    offset += limit;
+  }
+
+  idsBancoCacheDLH = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
+  return ids;
+}
+
+async function buscarIdsExcluidosDLH() {
+  if (idsExcluidosCacheDLH.valor && idsExcluidosCacheDLH.expiraEm > Date.now()) {
+    return idsExcluidosCacheDLH.valor;
+  }
+
+  const ids = new Set();
+  const limit = 1000;
+  let offset = 0;
+
+  while (true) {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh_excluidos?select=id&limit=${limit}&offset=${offset}`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+    validarListaSupabase(r, data, "Supabase certificados_dlh_excluidos");
+
+    if (!Array.isArray(data) || data.length === 0) break;
+
+    for (const item of data) {
+      ids.add(item.id);
+    }
+
+    if (data.length < limit) break;
+    offset += limit;
+  }
+
+  idsExcluidosCacheDLH = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
+  return ids;
+}
+
+async function contarCertificadosBancoDLH() {
+  return contarTabela("certificados_dlh");
+}
+
+async function atualizarControleSyncDLH(payload) {
   const response = await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?on_conflict=id`, {
     method: "POST",
     headers: {
       ...supabaseHeaders(),
       Prefer: "resolution=merge-duplicates,return=minimal"
     },
-    body: JSON.stringify({ id: 1, ...payload })
+    body: JSON.stringify({ id: 2, ...payload })
   });
 
   if (!response.ok) {
-    const detalhe = await response.text();
-    throw new Error(`Falha ao atualizar controle_sync: ${detalhe}`);
+    throw new Error(`Falha ao atualizar controle_sync DLH: ${await response.text()}`);
   }
 
-  invalidarCaches();
+  invalidarCachesDLH();
 }
 
-async function buscarControleSync() {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1&select=*`,
+async function buscarControleSyncDLH() {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.2&select=id,total_processados,ultima_execucao,em_execucao`,
     { headers: supabaseHeaders() }
   );
-
-  const data = await r.json();
-  validarListaSupabase(r, data, "Supabase controle_sync");
-  return data && data.length ? data[0] : null;
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, "Supabase controle_sync DLH");
+  return registros[0] || null;
 }
 
-async function buscarIdsBanco() {
-  if (idsBancoCache.valor && idsBancoCache.expiraEm > Date.now()) {
-    return idsBancoCache.valor;
-  }
-
-  const ids = new Set();
-  const limit = 1000;
-  let offset = 0;
-
-  while (true) {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=id&limit=${limit}&offset=${offset}`,
-      { headers: supabaseHeaders() }
-    );
-
-    const data = await r.json();
-    validarListaSupabase(r, data, "Supabase certificados");
-
-    if (!data || data.length === 0) break;
-
-    for (const item of data) {
-      ids.add(item.id);
-    }
-
-    if (data.length < limit) break;
-    offset += limit;
-  }
-
-  idsBancoCache = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
-  return ids;
+function execucaoTravadaDLH(controle) {
+  if (!controle?.em_execucao || !controle?.ultima_execucao) return false;
+  return Date.now() - new Date(controle.ultima_execucao).getTime() > 5 * 60 * 1000;
 }
 
-async function buscarIdsExcluidos() {
-  if (idsExcluidosCache.valor && idsExcluidosCache.expiraEm > Date.now()) {
-    return idsExcluidosCache.valor;
-  }
+// =========================
+// SYNC
+// =========================
+async function executarSyncDLH() {
+  const idsBanco = await buscarIdsBancoDLH();
+  const idsExcluidos = await buscarIdsExcluidosDLH();
+  const arquivosDrive = await buscarArquivosDriveDLH();
 
-  const ids = new Set();
-  const limit = 1000;
-  let offset = 0;
+  let processados = 0;
+  const erros = [];
 
-  while (true) {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_excluidos?select=id&limit=${limit}&offset=${offset}`,
-      { headers: supabaseHeaders() }
-    );
+  for (const f of arquivosDrive) {
+    if (idsBanco.has(f.id)) continue;
+    if (idsExcluidos.has(f.id)) continue;
+    if (processados >= LIMITE) break;
 
-    const data = await r.json();
-    validarListaSupabase(r, data, "Supabase certificados_excluidos");
+    try {
+      const proc = await processarPDFDLH(f.id, f.name);
+      const meta = proc.meta || {};
 
-    if (!data || data.length === 0) break;
+      if (!meta.dlh || !meta.serie || !meta.data) {
+        erros.push({
+          arquivo: f.name,
+          motivo: "Metadados insuficientes",
+          meta
+        });
+        continue;
+      }
 
-    for (const item of data) {
-      ids.add(item.id);
-    }
+      const certificadoFinal = proc.certificado || meta.certificado || "";
 
-    if (data.length < limit) break;
-    offset += limit;
-  }
+      const val = verificarValidade(meta.data);
+      const divergencia = avaliarDivergencia(meta.dlh, meta.serie);
+      const nomePadronizado = montarNomePadrao(meta.dlh, meta.serie, meta.data);
 
-  idsExcluidosCache = { valor: ids, expiraEm: Date.now() + IDS_CACHE_MS };
-  return ids;
-}
-
-async function contarCertificadosBanco() {
-  return contarTabela("certificados");
-}
-
-async function buscarArquivosDrive() {
-  if (drive) {
-    const arquivos = [];
-    let pageToken = null;
-
-    do {
-      const response = await executarGoogleComRetry(() =>
-        drive.files.list({
-          q: `'${FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false`,
-          fields: "nextPageToken, files(id, name, mimeType)",
-          pageSize: 1000,
-          pageToken: pageToken || undefined,
-          supportsAllDrives: true,
-          includeItemsFromAllDrives: true
-        })
+      const dupCheck = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id&dlh=eq.${encodeURIComponent(meta.dlh)}&serie=eq.${encodeURIComponent(meta.serie)}&data=eq.${encodeURIComponent(meta.data)}&certificado=eq.${encodeURIComponent(certificadoFinal)}`,
+        { headers: supabaseHeaders() }
       );
-      arquivos.push(...(response.data.files || []));
-      pageToken = response.data.nextPageToken || null;
-    } while (pageToken);
 
-    return arquivos;
+      const duplicados = await dupCheck.json();
+      const duplicado = Array.isArray(duplicados) && duplicados.length > 0;
+
+      const respInsert = await fetch(`${SUPABASE_URL}/rest/v1/certificados_dlh`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({
+          id: f.id,
+          nome_original: f.name,
+          nome_download: nomePadronizado || f.name,
+          dlh: meta.dlh,
+          serie: meta.serie,
+          data: meta.data,
+          certificado: certificadoFinal,
+          status: proc.status,
+          validade: val.valido,
+          vencimento: val.vencimento,
+          mes_ano_validade: val.mes_ano,
+          pontos_umidade: proc.pontos_umidade || [],
+          pontos_temperatura: proc.pontos_temperatura || [],
+          divergente: divergencia.divergente || duplicado,
+          duplicado: duplicado,
+          serie_esperada: divergencia.serie_esperada,
+          motivo_divergencia: duplicado
+            ? "Certificado duplicado"
+            : divergencia.motivo_divergencia,
+          criado_em: new Date().toISOString()
+        })
+      });
+
+      if (!respInsert.ok) {
+        const erroInsert = await respInsert.text();
+
+        erros.push({
+          arquivo: f.name,
+          motivo: erroInsert
+        });
+
+        continue;
+      }
+
+      idsBanco.add(f.id);
+      processados++;
+      invalidarCachesDLH();
+
+      await atualizarControleSyncDLH({
+        em_execucao: true,
+        ultima_execucao: new Date().toISOString(),
+        total_processados: idsBanco.size
+      });
+    } catch (e) {
+      erros.push({
+        arquivo: f.name,
+        motivo: e.message
+      });
+    }
   }
 
-  const arquivos = [];
-  let pageToken = null;
-
-  do {
-    const url = `https://www.googleapis.com/drive/v3/files?q='${FOLDER_ID}'+in+parents+and+mimeType='application/pdf'&key=${GOOGLE_API_KEY}&fields=nextPageToken,files(id,name,mimeType)&pageSize=1000${pageToken ? `&pageToken=${pageToken}` : ""}`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      throw new Error(data?.error?.message || `Erro ao listar Google Drive (HTTP ${res.status})`);
-    }
-
-    arquivos.push(...(data.files || []));
-    pageToken = data.nextPageToken || null;
-  } while (pageToken);
-
-  return arquivos;
+  return {
+    sucesso: true,
+    processados,
+    erros
+  };
 }
 
-// =========================
-// EXECUÇÃO DE SYNC EM BACKGROUND
-// =========================
-async function executarSyncEmBackground() {
-  if (syncLocalEmExecucao) return;
-  syncLocalEmExecucao = true;
+async function executarSyncAutomaticoDLH() {
+  if (syncLocalDLHEmExecucao) return;
+  syncLocalDLHEmExecucao = true;
   let deveContinuar = false;
 
   try {
-    const idsBanco = await buscarIdsBanco();
-    const idsExcluidos = await buscarIdsExcluidos();
-    const arquivosDrive = await buscarArquivosDrive();
-    const criterios = await buscarCriteriosCalibracao();
-
-    await atualizarControleSync({
+    const totalInicial = await contarCertificadosBancoDLH();
+    await atualizarControleSyncDLH({
       em_execucao: true,
       ultima_execucao: new Date().toISOString(),
-      total_processados: idsBanco.size
+      total_processados: totalInicial
     });
 
-    let processados = 0;
+    const resultado = await executarSyncDLH();
+    invalidarCachesDLH();
+    deveContinuar = resultado.processados > 0;
 
-    for (const f of arquivosDrive) {
-      if (idsBanco.has(f.id)) continue;
-      if (idsExcluidos.has(f.id)) continue;
-      if (processados >= LIMITE) break;
-
-      try {
-        const buffer = await baixarArquivoDrive(f.id);
-        const { texto } = await extrairTextoELinhasDoPDF(buffer);
-        const meta = extrairMetadadosDoTexto(texto, f.name);
-
-        if (!meta.dlt || !meta.serie || !meta.data) {
-          console.log("Arquivo sem metadados suficientes:", f.name, meta);
-          continue;
-        }
-
-        const tabela = await extrairTabelaPorColunas(buffer);
-
-        if (!tabela.ok) {
-          console.log("Arquivo sem tabela válida:", f.name, tabela.debug);
-          continue;
-        }
-
-        const status = tabela.pontos.every(p => p.soma <= criterios.limite_dlt)
-          ? "APROVADO"
-          : "REPROVADO";
-        const val = verificarValidade(meta.data);
-        const divergencia = avaliarDivergencia(meta.dlt, meta.serie);
-        const nomePadronizado = montarNomePadrao(meta.dlt, meta.serie, meta.data);
-
-        const respInsert = await fetch(`${SUPABASE_URL}/rest/v1/certificados`, {
-          method: "POST",
-          headers: supabaseHeaders(),
-          body: JSON.stringify({
-            id: f.id,
-            nome_original: f.name,
-            nome_download: nomePadronizado,
-            dlt: meta.dlt,
-            serie: meta.serie,
-            data: meta.data,
-            certificado: meta.certificado || "",
-            status,
-            validade: val.valido,
-            vencimento: val.vencimento,
-            mes_ano_validade: val.mes_ano,
-            pontos: tabela.pontos,
-            divergente: divergencia.divergente,
-            serie_esperada: divergencia.serie_esperada,
-            motivo_divergencia: divergencia.motivo_divergencia,
-            criado_em: new Date().toISOString()
-          })
-        });
-
-        if (!respInsert.ok) {
-          const erroInsert = await respInsert.text();
-          console.log("Erro ao salvar no banco:", f.name, erroInsert);
-          continue;
-        }
-
-        idsBanco.add(f.id);
-        processados++;
-        invalidarCaches();
-
-        await atualizarControleSync({
-          em_execucao: true,
-          ultima_execucao: new Date().toISOString(),
-          total_processados: idsBanco.size
-        });
-      } catch (e) {
-        console.log("Erro ao processar arquivo:", f.name, e.message);
-      }
-    }
-
-    const idsBancoAtualizado = await buscarIdsBanco();
-    const idsExcluidosAtualizado = await buscarIdsExcluidos();
-    const arquivosDriveAtualizados = await buscarArquivosDrive();
-    const faltantesRestantes = arquivosDriveAtualizados.filter(
-      f => !idsBancoAtualizado.has(f.id) && !idsExcluidosAtualizado.has(f.id)
-    ).length;
-
-    await atualizarControleSync({
+    const totalAtual = await contarCertificadosBancoDLH();
+    await atualizarControleSyncDLH({
       em_execucao: false,
       ultima_execucao: new Date().toISOString(),
-      total_processados: idsBancoAtualizado.size
+      total_processados: totalAtual
     });
-
-    deveContinuar = faltantesRestantes > 0 && processados > 0;
   } catch (e) {
-    console.log("Erro geral executarSyncEmBackground:", e.message);
-
+    console.log("Erro na sincronização automática DLH:", e.message);
     try {
-      await atualizarControleSync({
+      await atualizarControleSyncDLH({
         em_execucao: false,
         ultima_execucao: new Date().toISOString()
       });
     } catch (controleErro) {
-      console.log("Erro ao finalizar controle_sync:", controleErro.message);
+      console.log("Erro ao finalizar controle_sync DLH:", controleErro.message);
     }
   } finally {
-    syncLocalEmExecucao = false;
-
+    syncLocalDLHEmExecucao = false;
     if (deveContinuar) {
-      setTimeout(() => executarSyncEmBackground(), 3000);
+      setTimeout(() => executarSyncAutomaticoDLH(), 3000);
     }
   }
+}
+
+// =========================
+// REPROCESSAMENTO
+// =========================
+async function executarReprocessDLH(limit = 50, offset = 0) {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data,certificado&limit=${limit}&offset=${offset}`,
+    { headers: supabaseHeaders() }
+  );
+
+  const lista = await r.json();
+  validarListaSupabase(r, lista, "Supabase certificados_dlh para reprocessamento");
+  let processados = 0;
+  const erros = [];
+
+  for (const item of lista) {
+    try {
+      const proc = await processarPDFDLH(item.id, item.nome_original);
+      const meta = proc.meta || {};
+
+      const dataFinal = meta.data || item.data;
+      const dlhFinal = meta.dlh || item.dlh;
+      const serieFinal = meta.serie || item.serie;
+      const certificadoFinal = proc.certificado || meta.certificado || item.certificado || "";
+
+      const val = verificarValidade(dataFinal);
+      const divergencia = avaliarDivergencia(dlhFinal, serieFinal);
+      const nomePadronizado = montarNomePadrao(dlhFinal, serieFinal, dataFinal);
+
+      const dupCheck = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id&dlh=eq.${encodeURIComponent(dlhFinal)}&serie=eq.${encodeURIComponent(serieFinal)}&data=eq.${encodeURIComponent(dataFinal)}&certificado=eq.${encodeURIComponent(certificadoFinal)}`,
+        { headers: supabaseHeaders() }
+      );
+
+      const duplicados = await dupCheck.json();
+
+      const duplicado =
+        Array.isArray(duplicados) &&
+        duplicados.some(d => d.id !== item.id);
+
+      const update = await fetch(
+        `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${item.id}`,
+        {
+          method: "PATCH",
+          headers: supabaseHeaders(),
+          body: JSON.stringify({
+            nome_download: nomePadronizado,
+            dlh: dlhFinal,
+            serie: serieFinal,
+            data: dataFinal,
+            certificado: certificadoFinal,
+            status: proc.status,
+            validade: val.valido,
+            vencimento: val.vencimento,
+            mes_ano_validade: val.mes_ano,
+            pontos_umidade: proc.pontos_umidade || [],
+            pontos_temperatura: proc.pontos_temperatura || [],
+            duplicado: duplicado,
+            divergente: divergencia.divergente || duplicado,
+            serie_esperada: divergencia.serie_esperada,
+            motivo_divergencia: duplicado
+              ? "Certificado duplicado"
+              : divergencia.motivo_divergencia
+          })
+        }
+      );
+
+      if (!update.ok) {
+        erros.push({
+          arquivo: item.nome_original,
+          erro: await update.text()
+        });
+        continue;
+      }
+
+      processados++;
+    } catch (e) {
+      erros.push({
+        arquivo: item.nome_original,
+        erro: e.message
+      });
+    }
+  }
+
+  return {
+    mensagem: "Reprocessamento DLH concluído",
+    processados,
+    offset,
+    proximo_offset: offset + processados,
+    erros
+  };
 }
 
 // =========================
 // ROTAS
 // =========================
 app.get("/", (req, res) => {
-  res.send("API OK 🚀");
+  res.send("API DLH OK 🚀");
 });
 
-app.get("/auth/me", (req, res) => {
-  res.json({
-    user: {
-      id: req.auth.user.id,
-      email: req.auth.user.email
-    },
-    perfil: req.auth.perfil
-  });
-});
 
-app.get("/automacao/status", async (req, res) => {
-  if (!validarSegredoAutomacao(req, res)) return;
-
-  try {
-    let controle = await buscarControleSync();
-    if (execucaoTravada(controle)) {
-      await atualizarControleSync({
-        em_execucao: false,
-        ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
-      });
-      controle = { ...controle, em_execucao: false };
-    }
-
-    const [totalBanco, totalExcluidos, arquivosDrive] = await Promise.all([
-      contarCertificadosBanco(),
-      contarTabela("certificados_excluidos"),
-      buscarArquivosDrive()
-    ]);
-    const totalDrive = arquivosDrive.length;
-
-    res.json({
-      modulo: "DLT",
-      em_execucao: controle?.em_execucao || syncLocalEmExecucao,
-      ultima_execucao: controle?.ultima_execucao || null,
-      total_drive: totalDrive,
-      total_banco: totalBanco,
-      faltantes: Math.max(0, totalDrive - totalBanco - totalExcluidos)
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.post("/automacao/sincronizar", async (req, res) => {
-  if (!validarSegredoAutomacao(req, res)) return;
-
-  try {
-    const controle = await buscarControleSync();
-    if (syncLocalEmExecucao || (controle?.em_execucao && !execucaoTravada(controle))) {
-      return res.json({ iniciado: false, modulo: "DLT", mensagem: "DLT já está processando" });
-    }
-
-    res.status(202).json({ iniciado: true, modulo: "DLT", mensagem: "Sincronização DLT iniciada" });
-    executarSyncEmBackground();
-  } catch (e) {
-    if (!res.headersSent) res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/usuarios", async (req, res) => {
-  try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,criado_em,ultimo_acesso&order=criado_em.desc`,
-      { headers: supabaseHeaders() }
-    );
-    const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase usuários");
-    res.setHeader("Cache-Control", "no-store");
-    res.json({ total: registros.length, registros });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.post("/usuarios/convidar", async (req, res) => {
-  try {
-    if (!supabaseAdmin) throw new Error("Supabase Auth não configurado");
-
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const nome = String(req.body?.nome || "").trim();
-    const role = String(req.body?.role || "usuario").trim();
-    const rolesValidas = ["dev", "administrador", "usuario", "auditor"];
-
-    if (!email || !email.includes("@")) {
-      return res.status(400).json({ erro: "Informe um e-mail válido" });
-    }
-    if (!rolesValidas.includes(role)) {
-      return res.status(400).json({ erro: "Perfil de acesso inválido" });
-    }
-    if (req.auth.perfil.role !== "dev" && role === "dev") {
-      return res.status(403).json({ erro: "Somente DEV pode convidar outro DEV" });
-    }
-
-    const options = {
-      data: { nome: nome || email.split("@")[0], role }
-    };
-    if (INVITE_REDIRECT_URL) options.redirectTo = INVITE_REDIRECT_URL;
-
-    const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, options);
-    if (error) return res.status(400).json({ erro: error.message });
-
-    res.status(201).json({
-      sucesso: true,
-      mensagem: "Convite enviado",
-      usuario: { id: data.user?.id, email, nome, role }
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.patch("/usuarios/:id", async (req, res) => {
-  try {
-    const id = String(req.params.id);
-    const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo`,
-      { headers: supabaseHeaders() }
-    );
-    const atualData = validarListaSupabase(busca, await busca.json(), "Supabase usuário");
-    const atual = atualData[0];
-    if (!atual) return res.status(404).json({ erro: "Usuário não encontrado" });
-
-    const solicitanteDev = req.auth.perfil.role === "dev";
-    const role = req.body?.role === undefined ? atual.role : String(req.body.role);
-    const ativo = req.body?.ativo === undefined ? atual.ativo : Boolean(req.body.ativo);
-    const nome = req.body?.nome === undefined ? atual.nome : String(req.body.nome).trim();
-
-    if (!["dev", "administrador", "usuario", "auditor"].includes(role)) {
-      return res.status(400).json({ erro: "Perfil de acesso inválido" });
-    }
-    if (!solicitanteDev && (atual.role === "dev" || role === "dev")) {
-      return res.status(403).json({ erro: "Somente DEV pode alterar um perfil DEV" });
-    }
-    if (id === req.auth.user.id && !ativo) {
-      return res.status(400).json({ erro: "Você não pode desativar o próprio usuário" });
-    }
-
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}`,
-      {
-        method: "PATCH",
-        headers: { ...supabaseHeaders(), Prefer: "return=representation" },
-        body: JSON.stringify({ nome, role, ativo })
-      }
-    );
-    const registros = validarListaSupabase(
-      response,
-      await response.json(),
-      "Supabase atualização do usuário"
-    );
-
-    profileCache.delete(id);
-    authCache.clear();
-    res.json({ sucesso: true, usuario: registros[0] });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/criterios", async (req, res) => {
+app.get("/dlh/criterios", async (req, res) => {
   try {
     const criterios = await buscarCriteriosCalibracao();
     res.setHeader("Cache-Control", "private, max-age=300");
@@ -2083,18 +1987,23 @@ app.get("/criterios", async (req, res) => {
   }
 });
 
-app.patch("/criterios", async (req, res) => {
+app.patch("/dlh/criterios", async (req, res) => {
   try {
-    const limiteDlt = Number(req.body?.limite_dlt);
+    const limiteTemperatura = Number(req.body?.limite_temperatura);
+    const limiteUmidade = Number(req.body?.limite_umidade);
     const alteradoPor = String(req.body?.alterado_por || "").trim() || null;
 
-    if (!Number.isFinite(limiteDlt) || limiteDlt <= 0 || limiteDlt > 100) {
-      return res.status(400).json({ erro: "limite_dlt deve ser maior que zero e menor ou igual a 100." });
+    if (!Number.isFinite(limiteTemperatura) || limiteTemperatura <= 0 || limiteTemperatura > 100) {
+      return res.status(400).json({ erro: "limite_temperatura deve ser maior que zero e menor ou igual a 100." });
+    }
+
+    if (!Number.isFinite(limiteUmidade) || limiteUmidade <= 0 || limiteUmidade > 100) {
+      return res.status(400).json({ erro: "limite_umidade deve ser maior que zero e menor ou igual a 100." });
     }
 
     const anterior = await buscarCriteriosCalibracao();
     const atualizadoEm = new Date().toISOString();
-    const response = await fetch(
+    const resposta = await fetch(
       `${SUPABASE_URL}/rest/v1/criterios_calibracao?on_conflict=id`,
       {
         method: "POST",
@@ -2104,21 +2013,24 @@ app.patch("/criterios", async (req, res) => {
         },
         body: JSON.stringify({
           id: 1,
-          limite_dlt: limiteDlt,
+          limite_temperatura: limiteTemperatura,
+          limite_umidade: limiteUmidade,
           atualizado_em: atualizadoEm
         })
       }
     );
-    const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase atualização do DMA DLT");
+    const data = await resposta.json();
+    const registros = validarListaSupabase(resposta, data, "Supabase atualização do DMA DLH");
 
     const historico = await fetch(`${SUPABASE_URL}/rest/v1/criterios_calibracao_historico`, {
       method: "POST",
       headers: supabaseHeaders(),
       body: JSON.stringify({
-        modulo: "DLT",
-        limite_dlt_anterior: anterior.limite_dlt,
-        limite_dlt_novo: limiteDlt,
+        modulo: "DLH",
+        limite_temperatura_anterior: anterior.limite_temperatura,
+        limite_temperatura_novo: limiteTemperatura,
+        limite_umidade_anterior: anterior.limite_umidade,
+        limite_umidade_novo: limiteUmidade,
         alterado_por: alteradoPor,
         alterado_em: atualizadoEm
       })
@@ -2127,8 +2039,12 @@ app.patch("/criterios", async (req, res) => {
       throw new Error(`DMA atualizado, mas houve falha ao gravar histórico: ${await historico.text()}`);
     }
 
-    criteriosCache = {
-      valor: { limite_dlt: limiteDlt, atualizado_em: atualizadoEm },
+    criteriosCacheDLH = {
+      valor: {
+        limite_temperatura: limiteTemperatura,
+        limite_umidade: limiteUmidade,
+        atualizado_em: atualizadoEm
+      },
       expiraEm: Date.now() + CRITERIOS_CACHE_MS
     };
 
@@ -2142,15 +2058,15 @@ app.patch("/criterios", async (req, res) => {
   }
 });
 
-app.get("/criterios/historico", async (req, res) => {
+app.get("/dlh/criterios/historico", async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/criterios_calibracao_historico?modulo=eq.DLT&select=id,limite_dlt_anterior,limite_dlt_novo,alterado_por,alterado_em&order=alterado_em.desc&limit=${limit}`,
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao_historico?modulo=eq.DLH&select=id,limite_temperatura_anterior,limite_temperatura_novo,limite_umidade_anterior,limite_umidade_novo,alterado_por,alterado_em&order=alterado_em.desc&limit=${limit}`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase histórico DMA DLT");
+    const registros = validarListaSupabase(response, data, "Supabase histórico DMA DLH");
     res.setHeader("Cache-Control", "private, max-age=300");
     res.json({ total: registros.length, registros });
   } catch (e) {
@@ -2158,16 +2074,68 @@ app.get("/criterios/historico", async (req, res) => {
   }
 });
 
-app.get("/metricas/atual", (req, res) => {
+app.get("/dlh/automacao/status", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  try {
+    let controle = await buscarControleSyncDLH();
+    if (execucaoTravadaDLH(controle)) {
+      await atualizarControleSyncDLH({
+        em_execucao: false,
+        ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
+      });
+      controle = { ...controle, em_execucao: false };
+    }
+
+    const [totalBanco, totalExcluidos, arquivosDrive] = await Promise.all([
+      contarCertificadosBancoDLH(),
+      contarTabela("certificados_dlh_excluidos"),
+      buscarArquivosDriveDLH()
+    ]);
+    const totalDrive = arquivosDrive.length;
+
+    res.json({
+      modulo: "DLH",
+      em_execucao: controle?.em_execucao || syncLocalDLHEmExecucao,
+      ultima_execucao: controle?.ultima_execucao || null,
+      total_drive: totalDrive,
+      total_banco: totalBanco,
+      faltantes: Math.max(0, totalDrive - totalBanco - totalExcluidos)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/dlh/automacao/sincronizar", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  try {
+    const controle = await buscarControleSyncDLH();
+    if (
+      syncLocalDLHEmExecucao ||
+      (controle?.em_execucao && !execucaoTravadaDLH(controle))
+    ) {
+      return res.json({ iniciado: false, modulo: "DLH", mensagem: "DLH já está processando" });
+    }
+
+    res.status(202).json({ iniciado: true, modulo: "DLH", mensagem: "Sincronização DLH iniciada" });
+    executarSyncAutomaticoDLH();
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/metricas/atual", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({
-    servico: "DLT",
+    servico: "DLH",
     consolidado: false,
     ...metricas
   });
 });
 
-app.get("/metricas", async (req, res) => {
+app.get("/dlh/metricas", async (req, res) => {
   try {
     const dias = Math.min(
       METRICS_RETENTION_DAYS,
@@ -2175,11 +2143,11 @@ app.get("/metricas", async (req, res) => {
     );
     const desde = new Date(Date.now() - dias * 86400000).toISOString();
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/metricas_consumo?servico=eq.DLT&periodo_fim=gte.${encodeURIComponent(desde)}&select=id,servico,periodo_inicio,periodo_fim,requisicoes,respostas_bytes,requisicoes_externas,supabase_requisicoes,supabase_bytes,google_requisicoes,google_bytes,erros,tempo_total_ms,rotas&order=periodo_fim.desc&limit=500`,
+      `${SUPABASE_URL}/rest/v1/metricas_consumo?servico=eq.DLH&periodo_fim=gte.${encodeURIComponent(desde)}&select=id,servico,periodo_inicio,periodo_fim,requisicoes,respostas_bytes,requisicoes_externas,supabase_requisicoes,supabase_bytes,google_requisicoes,google_bytes,erros,tempo_total_ms,rotas&order=periodo_fim.desc&limit=500`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase métricas DLT");
+    const registros = validarListaSupabase(response, data, "Supabase métricas DLH");
     res.setHeader("Cache-Control", "private, max-age=300");
     res.json({ estimativa: true, dias, total: registros.length, registros });
   } catch (e) {
@@ -2187,36 +2155,32 @@ app.get("/metricas", async (req, res) => {
   }
 });
 
-app.get("/status", async (req, res) => {
+app.get("/dlh/status", async (req, res) => {
   try {
-    if (statusCache.valor && statusCache.expiraEm > Date.now()) {
+    if (statusCacheDLH.valor && statusCacheDLH.expiraEm > Date.now()) {
       res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
-      return res.json(statusCache.valor);
+      return res.json(statusCacheDLH.valor);
     }
 
-    let controle = await buscarControleSync();
-
-    if (execucaoTravada(controle)) {
-      await atualizarControleSync({
+    let controle = await buscarControleSyncDLH();
+    if (execucaoTravadaDLH(controle)) {
+      await atualizarControleSyncDLH({
         em_execucao: false,
         ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
       });
-      controle = {
-        ...controle,
-        em_execucao: false
-      };
+      controle = { ...controle, em_execucao: false };
     }
 
-    const totalBanco = await contarCertificadosBanco();
-    const totalExcluidos = await contarTabela("certificados_excluidos");
-    const arquivosDrive = await buscarArquivosDrive();
+    const totalBanco = await contarCertificadosBancoDLH();
+    const totalExcluidos = await contarTabela("certificados_dlh_excluidos");
+    const arquivosDrive = await buscarArquivosDriveDLH();
 
     const totalDrive = arquivosDrive.length;
     const faltantes = Math.max(0, totalDrive - totalBanco - totalExcluidos);
 
     const payload = {
-      id: controle?.id || 1,
-      total_processados: controle?.total_processados || 0,
+      id: 2,
+      total_processados: controle?.total_processados ?? totalBanco,
       em_execucao: controle?.em_execucao || false,
       ultima_execucao: controle?.ultima_execucao || null,
       total_drive: totalDrive,
@@ -2224,7 +2188,7 @@ app.get("/status", async (req, res) => {
       faltantes
     };
 
-    statusCache = { valor: payload, expiraEm: Date.now() + STATUS_CACHE_MS };
+    statusCacheDLH = { valor: payload, expiraEm: Date.now() + STATUS_CACHE_MS };
     res.setHeader("Cache-Control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60");
     res.json(payload);
   } catch (e) {
@@ -2232,17 +2196,16 @@ app.get("/status", async (req, res) => {
   }
 });
 
-app.get("/status/supabase", async (req, res) => {
+app.get("/dlh/status/supabase", async (req, res) => {
   try {
-    const controle = await buscarControleSync();
-    const totalBanco = await contarCertificadosBanco();
-    res.json({ ok: true, servico: "supabase", controle, total_banco: totalBanco });
+    const totalBanco = await contarCertificadosBancoDLH();
+    res.json({ ok: true, servico: "supabase", total_banco: totalBanco });
   } catch (e) {
     res.status(500).json({ ok: false, servico: "supabase", erro: e.message });
   }
 });
 
-app.get("/status/google", async (req, res) => {
+app.get("/dlh/status/google", async (req, res) => {
   try {
     if (!googleAuth || !drive) {
       throw new Error("GOOGLE_CLIENT_EMAIL ou GOOGLE_PRIVATE_KEY não configurado");
@@ -2251,7 +2214,7 @@ app.get("/status/google", async (req, res) => {
     await executarGoogleComRetry(() => googleAuth.getAccessToken());
     const response = await executarGoogleComRetry(() =>
       drive.files.list({
-        q: `'${FOLDER_ID}' in parents and trashed=false`,
+        q: `'${FOLDER_ID_DLH}' in parents and trashed=false`,
         fields: "files(id)",
         pageSize: 1,
         supportsAllDrives: true,
@@ -2270,16 +2233,41 @@ app.get("/status/google", async (req, res) => {
   }
 });
 
-app.get("/certificados", async (req, res) => {
+app.get("/dlh/sync", async (req, res) => {
   try {
-    const listaEquipamentos = normalizarListaQuery(req.query.equipamentos || req.query.dlt || req.query.lista);
+    if (syncLocalDLHEmExecucao) {
+      return res.json({ mensagem: "Processamento DLH já está em execução" });
+    }
+
+    res.status(202).json({ mensagem: "Processamento DLH iniciado" });
+    executarSyncAutomaticoDLH();
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/reprocess", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 50);
+    const offset = Number(req.query.offset || 0);
+
+    const resultado = await executarReprocessDLH(limit, offset);
+    res.json(resultado);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/certificados", async (req, res) => {
+  try {
+    const listaEquipamentos = normalizarListaQuery(req.query.equipamentos || req.query.dlh || req.query.lista);
     const testeInicio = normalizarDataQuery(req.query.teste_inicio || req.query.data_inicio || req.query.inicio);
     const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
 
     if (listaEquipamentos.length && testeInicio && testeFim) {
       const data = await buscarCertificadosPorPeriodoEmLotes({
-        tabela: "certificados",
-        campoEquipamento: "dlt",
+        tabela: "certificados_dlh",
+        campoEquipamento: "dlh",
         equipamentos: listaEquipamentos,
         testeInicio,
         testeFim
@@ -2290,7 +2278,7 @@ app.get("/certificados", async (req, res) => {
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=${CERTIFICADOS_LISTA_SELECT}&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=${CERTIFICADOS_DLH_LISTA_SELECT}&order=data.desc&limit=${limit}&offset=${offset}`,
       { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
     const data = await r.json();
@@ -2301,7 +2289,7 @@ app.get("/certificados", async (req, res) => {
   }
 });
 
-app.post("/certificados/busca-lista", async (req, res) => {
+app.post("/dlh/certificados/busca-lista", async (req, res) => {
   try {
     const equipamentos = Array.isArray(req.body?.equipamentos)
       ? req.body.equipamentos.map(String).filter(Boolean)
@@ -2313,9 +2301,9 @@ app.post("/certificados/busca-lista", async (req, res) => {
       req.body?.teste_fim || req.body?.data_fim || req.body?.fim
     );
 
-    const unicos = [...new Set(equipamentos.map(normalizarDLT).filter(Boolean))];
+    const unicos = [...new Set(equipamentos.map(normalizarDLH).filter(Boolean))];
     if (!unicos.length) {
-      return res.status(400).json({ erro: "Informe ao menos um equipamento DLT" });
+      return res.status(400).json({ erro: "Informe ao menos um equipamento DLH" });
     }
     if (unicos.length > 500) {
       return res.status(400).json({
@@ -2328,8 +2316,8 @@ app.post("/certificados/busca-lista", async (req, res) => {
     }
 
     const registros = await buscarCertificadosPorPeriodoEmLotes({
-      tabela: "certificados",
-      campoEquipamento: "dlt",
+      tabela: "certificados_dlh",
+      campoEquipamento: "dlh",
       equipamentos: unicos,
       testeInicio,
       testeFim
@@ -2339,25 +2327,25 @@ app.post("/certificados/busca-lista", async (req, res) => {
     res.json({
       teste_inicio: testeInicio,
       teste_fim: testeFim,
-      ...montarResultadoBuscaLista(registros, unicos, "dlt", normalizarDLT)
+      ...montarResultadoBuscaLista(registros, unicos, "dlh", normalizarDLH)
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
 
-app.get("/certificados/:id/detalhes", async (req, res) => {
+app.get("/dlh/certificados/:id/detalhes", async (req, res) => {
   try {
     const id = encodeURIComponent(req.params.id);
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,pontos,status,certificado,data,vencimento`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}&select=id,pontos_umidade,pontos_temperatura,status,certificado,data,vencimento`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase detalhes do certificado");
+    const registros = validarListaSupabase(response, data, "Supabase detalhes do certificado DLH");
 
     if (!registros.length) {
-      return res.status(404).json({ erro: "Certificado não encontrado" });
+      return res.status(404).json({ erro: "Certificado DLH não encontrado" });
     }
 
     res.setHeader("Cache-Control", "private, max-age=3600");
@@ -2367,13 +2355,13 @@ app.get("/certificados/:id/detalhes", async (req, res) => {
   }
 });
 
-app.get("/divergentes", async (req, res) => {
+app.get("/dlh/divergentes", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 100);
     const offset = Number(req.query.offset || 0);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=${CERTIFICADOS_LISTA_SELECT}&divergente=eq.true&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=${CERTIFICADOS_DLH_LISTA_SELECT}&or=(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null,status.eq.ERRO)&order=criado_em.desc&limit=${limit}&offset=${offset}`,
       {
         headers: {
           ...supabaseHeaders(),
@@ -2384,204 +2372,28 @@ app.get("/divergentes", async (req, res) => {
 
     const data = await r.json();
     const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
+    const total = contentRange
+      ? Number(contentRange.split("/")[1])
+      : Array.isArray(data)
+        ? data.length
+        : 0;
 
     res.json({
       total,
       limit,
       offset,
-      registros: data
+      registros: Array.isArray(data) ? data : []
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
 
-app.get("/historico-exclusoes", async (req, res) => {
+app.get("/dlh/pendentes", async (req, res) => {
   try {
-    const limit = Number(req.query.limit || 100);
-    const offset = Number(req.query.offset || 0);
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_excluidos?select=*&order=excluido_em.desc&limit=${limit}&offset=${offset}`,
-      {
-        headers: {
-          ...supabaseHeaders(),
-          Prefer: "count=exact"
-        }
-      }
-    );
-
-    const data = await r.json();
-    const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
-
-    res.json({
-      total,
-      limit,
-      offset,
-      registros: data
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/relatorios-diarios", async (req, res) => {
-  try {
-    const limit = Number(req.query.limit || 100);
-    const offset = Number(req.query.offset || 0);
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/relatorios_diarios?select=*&order=criado_em.desc&limit=${limit}&offset=${offset}`,
-      {
-        headers: {
-          ...supabaseHeaders(),
-          Prefer: "count=exact"
-        }
-      }
-    );
-
-    const data = await r.json();
-    const contentRange = r.headers.get("content-range");
-    const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
-
-    res.json({
-      total,
-      limit,
-      offset,
-      registros: data
-    });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/sync", async (req, res) => {
-  try {
-    const controle = await buscarControleSync();
-
-    if (controle?.em_execucao && !execucaoTravada(controle)) {
-      return res.json({
-        mensagem: "Processamento já está em execução",
-        novos_processados: 0
-      });
-    }
-
-    if (execucaoTravada(controle)) {
-      await atualizarControleSync({
-        em_execucao: false,
-        total_processados: 0,
-        ultima_execucao: new Date().toISOString()
-      });
-    }
-
-    res.json({
-      mensagem: "Processamento iniciado",
-      novos_processados: 0
-    });
-
-    executarSyncEmBackground();
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/reprocess", async (req, res) => {
-  try {
-    const limit = Number(req.query.limit || 50);
-    const offset = Number(req.query.offset || 0);
-
-    const controle = await buscarControleSync();
-
-    if (controle?.em_execucao) {
-      return res.json({
-        mensagem: "Processamento já está em execução",
-        processados: 0,
-        offset,
-        proximo_offset: offset
-      });
-    }
-
-    await atualizarControleSync({
-      em_execucao: true,
-      ultima_execucao: new Date().toISOString(),
-      total_processados: 0
-    });
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=id,data,dlt,serie&limit=${limit}&offset=${offset}`,
-      { headers: supabaseHeaders() }
-    );
-
-    const lista = await r.json();
-    validarListaSupabase(r, lista, "Supabase certificados para reprocessamento");
-    let total = 0;
-
-    for (const item of lista) {
-      const proc = await processarPDF(item.id);
-      const val = verificarValidade(item.data);
-      const divergencia = avaliarDivergencia(item.dlt, item.serie);
-      const nomePadronizado = montarNomePadrao(item.dlt, item.serie, item.data);
-
-      await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${item.id}`, {
-        method: "PATCH",
-        headers: supabaseHeaders(),
-        body: JSON.stringify({
-          status: proc.status,
-          pontos: proc.pontos,
-          certificado: proc.certificado || "",
-          validade: val.valido,
-          vencimento: val.vencimento,
-          mes_ano_validade: val.mes_ano,
-          nome_download: nomePadronizado,
-          divergente: divergencia.divergente,
-          serie_esperada: divergencia.serie_esperada,
-          motivo_divergencia: divergencia.motivo_divergencia
-        })
-      });
-
-      total++;
-
-      await atualizarControleSync({
-        em_execucao: true,
-        ultima_execucao: new Date().toISOString(),
-        total_processados: total
-      });
-    }
-
-    await atualizarControleSync({
-      em_execucao: false,
-      ultima_execucao: new Date().toISOString(),
-      total_processados: total
-    });
-
-    res.json({
-      mensagem: "Reprocessamento concluído",
-      processados: total,
-      offset,
-      proximo_offset: offset + total
-    });
-  } catch (e) {
-    await atualizarControleSync({
-      em_execucao: false,
-      ultima_execucao: new Date().toISOString()
-    });
-
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/teste/:id", async (req, res) => {
-  const resultado = await processarPDF(req.params.id);
-  res.json(resultado);
-});
-
-app.get("/pendentes", async (req, res) => {
-  try {
-    const idsBanco = await buscarIdsBanco();
-    const idsExcluidos = await buscarIdsExcluidos();
-    const arquivosDrive = await buscarArquivosDrive();
+    const idsBanco = await buscarIdsBancoDLH();
+    const idsExcluidos = await buscarIdsExcluidosDLH();
+    const arquivosDrive = await buscarArquivosDriveDLH();
 
     const pendentes = arquivosDrive
       .filter(f => !idsBanco.has(f.id) && !idsExcluidos.has(f.id))
@@ -2600,13 +2412,22 @@ app.get("/pendentes", async (req, res) => {
   }
 });
 
+app.get("/dlh/teste/:id", async (req, res) => {
+  try {
+    const resultado = await processarPDFDLH(req.params.id);
+    res.json(resultado);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
 
-app.post("/downloads/massa", async (req, res) => {
+
+app.post("/dlh/downloads/massa", async (req, res) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String).filter(Boolean) : [];
     const listaEquipamentos = Array.isArray(req.body?.equipamentos)
       ? req.body.equipamentos.map(String).filter(Boolean)
-      : normalizarListaQuery(req.body?.equipamentos || req.body?.dlt || req.body?.lista);
+      : normalizarListaQuery(req.body?.equipamentos || req.body?.dlh || req.body?.lista);
     const testeInicio = normalizarDataQuery(req.body?.teste_inicio || req.body?.data_inicio || req.body?.inicio);
     const testeFim = normalizarDataQuery(req.body?.teste_fim || req.body?.data_fim || req.body?.fim);
 
@@ -2614,14 +2435,14 @@ app.post("/downloads/massa", async (req, res) => {
 
     if (ids.length) {
       registros = await buscarCertificadosPorIdsEmLotes(
-        "certificados",
-        "id,nome_original,nome_download,dlt,serie,data,vencimento",
+        "certificados_dlh",
+        "id,nome_original,nome_download,dlh,serie,data,vencimento",
         ids
       );
     } else if (listaEquipamentos.length && testeInicio && testeFim) {
       registros = await buscarCertificadosPorPeriodoEmLotes({
-        tabela: "certificados",
-        campoEquipamento: "dlt",
+        tabela: "certificados_dlh",
+        campoEquipamento: "dlh",
         equipamentos: listaEquipamentos,
         testeInicio,
         testeFim
@@ -2631,9 +2452,9 @@ app.post("/downloads/massa", async (req, res) => {
     }
 
     const jobId = crypto.randomUUID();
-    downloadJobs.set(jobId, {
+    downloadJobsDLH.set(jobId, {
       id: jobId,
-      tipo: "DLT",
+      tipo: "DLH",
       status: "pendente",
       total: Array.isArray(registros) ? registros.length : 0,
       processados: 0,
@@ -2647,8 +2468,8 @@ app.post("/downloads/massa", async (req, res) => {
     });
 
     setTimeout(() => {
-      processarDownloadMassa(jobId, Array.isArray(registros) ? registros : []).catch(e => {
-        const job = downloadJobs.get(jobId);
+      processarDownloadMassaDLH(jobId, Array.isArray(registros) ? registros : []).catch(e => {
+        const job = downloadJobsDLH.get(jobId);
         if (job) {
           job.status = "erro";
           job.erro = e.message;
@@ -2663,15 +2484,15 @@ app.post("/downloads/massa", async (req, res) => {
   }
 });
 
-app.get("/downloads/massa/:jobId", (req, res) => {
-  const job = downloadJobs.get(req.params.jobId);
+app.get("/dlh/downloads/massa/:jobId", (req, res) => {
+  const job = downloadJobsDLH.get(req.params.jobId);
   if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
   res.json(job);
 });
 
-app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
+app.get("/dlh/downloads/massa/:jobId/arquivo", async (req, res) => {
   try {
-    const job = downloadJobs.get(req.params.jobId);
+    const job = downloadJobsDLH.get(req.params.jobId);
     if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
     if (job.status !== "concluido" || !job.arquivo_zip_drive_id) {
       return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
@@ -2694,7 +2515,7 @@ app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
     res.setHeader("Content-Type", "application/zip");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${job.arquivo_zip_nome || "certificados-dlt.zip"}"`
+      `attachment; filename="${job.arquivo_zip_nome || "certificados-dlh.zip"}"`
     );
     arquivo.data.on("error", e => {
       if (!res.headersSent) res.status(500).json({ erro: e.message });
@@ -2706,22 +2527,22 @@ app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
   }
 });
 
-app.get("/download/:id", async (req, res) => {
+app.get("/dlh/download/:id", async (req, res) => {
   try {
     const id = req.params.id;
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,nome_download`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}&select=id,nome_download`,
       { headers: supabaseHeaders() }
     );
 
     const data = await r.json();
 
-    if (!data || data.length === 0) {
+    if (!Array.isArray(data) || data.length === 0) {
       return res.status(404).send("Arquivo não encontrado");
     }
 
-    const nome = data[0].nome_download || `arquivo_${id}.pdf`;
+    const nome = data[0].nome_download || `DLH_${id}.pdf`;
     const buffer = await baixarArquivoDrive(id);
 
     res.setHeader("Content-Type", "application/pdf");
@@ -2732,19 +2553,54 @@ app.get("/download/:id", async (req, res) => {
   }
 });
 
-app.delete("/certificados/:id", async (req, res) => {
+app.get("/dlh/historico-exclusoes", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit || 100);
+    const offset = Number(req.query.offset || 0);
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh_excluidos?select=*&order=excluido_em.desc&limit=${limit}&offset=${offset}`,
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "count=exact"
+        }
+      }
+    );
+
+    const data = await r.json();
+    const contentRange = r.headers.get("content-range");
+    const total = contentRange ? Number(contentRange.split("/")[1]) : Array.isArray(data) ? data.length : 0;
+
+    res.json({
+      total,
+      limit,
+      offset,
+      registros: Array.isArray(data) ? data : []
+    });
+  } catch (e) {
+    res.json({
+      total: 0,
+      limit: Number(req.query.limit || 100),
+      offset: Number(req.query.offset || 0),
+      registros: []
+    });
+  }
+});
+
+app.delete("/dlh/certificados/:id", async (req, res) => {
   try {
     const id = req.params.id;
 
     const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=*`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}&select=*`,
       { headers: supabaseHeaders() }
     );
 
     const registros = await busca.json();
 
-    if (!registros || registros.length === 0) {
-      return res.status(404).json({ erro: "Certificado não encontrado" });
+    if (!Array.isArray(registros) || registros.length === 0) {
+      return res.status(404).json({ erro: "Certificado DLH não encontrado" });
     }
 
     const certificado = registros[0];
@@ -2752,22 +2608,35 @@ app.delete("/certificados/:id", async (req, res) => {
     const podeExcluir =
       certificado.divergente === true ||
       certificado.duplicado === true ||
-      !!certificado.motivo_divergencia;
+      !!certificado.motivo_divergencia ||
+      certificado.motivo_divergencia === "Série divergente" ||
+      certificado.motivo_divergencia === "DLH inválido" ||
+      certificado.motivo_divergencia === "DLH não encontrado na base";
 
     if (!podeExcluir) {
       return res.status(400).json({
-        erro: "Exclusão permitida apenas para certificados divergentes"
+        erro: "Exclusão permitida apenas para certificados divergentes, duplicados ou com inconsistência de DLH/série."
       });
     }
 
+    let motivoExclusao = "Exclusão manual pelo Lovable";
+
+    if (certificado.duplicado === true) {
+      motivoExclusao += " - Certificado duplicado";
+    } else if (certificado.motivo_divergencia) {
+      motivoExclusao += ` - ${certificado.motivo_divergencia}`;
+    } else if (certificado.divergente === true) {
+      motivoExclusao += " - Divergente";
+    }
+
     const insereHistorico = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_excluidos`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh_excluidos`,
       {
         method: "POST",
         headers: supabaseHeaders(),
         body: JSON.stringify({
           ...certificado,
-          motivo_exclusao: `Exclusão manual pelo Lovable - ${certificado.motivo_divergencia || "Divergente"}`,
+          motivo_exclusao: motivoExclusao,
           excluido_em: new Date().toISOString()
         })
       }
@@ -2775,13 +2644,14 @@ app.delete("/certificados/:id", async (req, res) => {
 
     if (!insereHistorico.ok) {
       const erroHistorico = await insereHistorico.text();
+
       return res.status(500).json({
         erro: `Falha ao gravar histórico: ${erroHistorico}`
       });
     }
 
     const del = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}`,
       {
         method: "DELETE",
         headers: supabaseHeaders()
@@ -2790,32 +2660,34 @@ app.delete("/certificados/:id", async (req, res) => {
 
     if (!del.ok) {
       const erroBanco = await del.text();
+
       return res.status(500).json({
         erro: `Falha ao excluir da base principal: ${erroBanco}`
       });
     }
 
-    idsBancoCache.valor?.delete(id);
-    idsExcluidosCache.valor?.add(id);
-    invalidarCaches();
+    idsBancoCacheDLH.valor?.delete(id);
+    idsExcluidosCacheDLH.valor?.add(id);
+    invalidarCachesDLH();
 
-    return res.json({
+    res.json({
       sucesso: true,
-      mensagem: "Certificado removido da base e registrado no histórico",
+      mensagem: "Certificado DLH excluído e registrado no histórico.",
       id,
-      nome_original: certificado.nome_original
+      nome_original: certificado.nome_original,
+      motivo_exclusao: motivoExclusao
     });
   } catch (e) {
-    return res.status(500).json({ erro: e.message });
+    res.status(500).json({ erro: e.message });
   }
 });
 
-app.get("/relatorio-dia/dados", async (req, res) => {
+app.get("/dlh/relatorio-dia/dados", async (req, res) => {
   try {
     const dataRelatorio = req.query.data || obterHojeISO();
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
       { headers: supabaseHeaders() }
     );
 
@@ -2824,9 +2696,12 @@ app.get("/relatorio-dia/dados", async (req, res) => {
       mesmaData(item.criado_em, dataRelatorio)
     );
 
+    const criterios = await buscarCriteriosCalibracao();
+
     res.json({
       data_relatorio: dataRelatorio,
       total: dados.length,
+      criterios_aceitacao: criterios,
       registros: dados
     });
   } catch (e) {
@@ -2834,128 +2709,50 @@ app.get("/relatorio-dia/dados", async (req, res) => {
   }
 });
 
-app.get("/relatorio-dia/html", async (req, res) => {
+app.get("/dlh/relatorio-dia/excel", async (req, res) => {
   try {
     const dataRelatorio = req.query.data || obterHojeISO();
 
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
-      { headers: supabaseHeaders() }
-    );
-
-    const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
-
-    const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(html);
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/relatorio-dia/pdf", async (req, res) => {
-  let browser;
-
-  try {
-    const dataRelatorio = req.query.data || obterHojeISO();
-    const salvar = String(req.query.salvar || "0") === "1";
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
-      { headers: supabaseHeaders() }
-    );
-
-    const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
-
-    const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
-    const nomeArquivo = `RELATORIO_DIARIO_174T_${dataRelatorio}.pdf`;
-
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle" });
-
-    const pdfPath = path.join(os.tmpdir(), nomeArquivo);
-
-    await page.pdf({
-      path: pdfPath,
-      format: "A4",
-      landscape: true,
-      printBackground: true,
-      margin: {
-        top: "8mm",
-        right: "8mm",
-        bottom: "8mm",
-        left: "8mm"
-      }
-    });
-
-    await browser.close();
-    browser = null;
-
-    if (salvar) {
-      const arquivoDrive = await salvarRelatorioNoDrive(pdfPath, nomeArquivo);
-
-      await fetch(`${SUPABASE_URL}/rest/v1/relatorios_diarios`, {
-        method: "POST",
-        headers: supabaseHeaders(),
-        body: JSON.stringify({
-          data_relatorio: dataRelatorio,
-          nome_arquivo: nomeArquivo,
-          drive_file_id: arquivoDrive.id || null,
-          drive_link: arquivoDrive.webViewLink || arquivoDrive.webContentLink || null,
-          total_registros: dados.length
-        })
-      });
+    if (!fs.existsSync(MODELO_RELATORIO_PATH)) {
+      throw new Error(
+        "Arquivo modelo-relatorio.xlsx não encontrado na raiz do projeto. Adicione a planilha modelo no repositório com este nome."
+      );
     }
-
-    const buffer = fs.readFileSync(pdfPath);
-    fs.unlinkSync(pdfPath);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
-    return res.send(buffer);
-  } catch (e) {
-    if (browser) {
-      await browser.close();
-    }
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get("/relatorio-dia/excel", async (req, res) => {
-  try {
-    const dataRelatorio = req.query.data || obterHojeISO();
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
-      {
-        headers: supabaseHeaders()
-      }
-    );
-
-    const todos = await r.json();
-
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
 
     const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(MODELO_RELATORIO_PATH);
 
     workbook.creator = "ITA FRIA";
-    workbook.lastModifiedBy = "Sistema";
+    workbook.lastModifiedBy = "Sistema de Certificados DLH";
     workbook.created = new Date();
     workbook.modified = new Date();
 
-    const sheet = workbook.addWorksheet("Relatório DLT");
+    const sheet = workbook.worksheets[0];
 
+    if (!sheet) {
+      throw new Error("A planilha modelo não possui nenhuma aba.");
+    }
+
+    sheet.name = "Relatório DLH";
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const todos = await r.json();
+
+    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
+      mesmaData(item.criado_em, dataRelatorio)
+    );
+
+    const criteriosRelatorio = await buscarCriteriosCalibracao();
+    const limiteTemperaturaRelatorio = Number(criteriosRelatorio.limite_temperatura ?? 0.5);
+    const limiteUmidadeRelatorio = Number(criteriosRelatorio.limite_umidade ?? 5.0);
+
+    // =========================
+    // CONFIGURAÇÃO DE IMPRESSÃO
+    // =========================
     sheet.pageSetup = {
       paperSize: 9,
       orientation: "landscape",
@@ -2969,260 +2766,379 @@ app.get("/relatorio-dia/excel", async (req, res) => {
         right: 0.2,
         top: 0.3,
         bottom: 0.3,
-        header: 0.1,
-        footer: 0.1
+        header: 0.2,
+        footer: 0.2
       }
     };
 
-    sheet.properties.defaultRowHeight = 20;
+    sheet.headerFooter = sheet.headerFooter || {};
+
+    const footerOriginal =
+      sheet.headerFooter.oddFooter ||
+      "&LResp.: ________________________________&CSistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
+
+    sheet.headerFooter.oddFooter = footerOriginal;
+    sheet.headerFooter.evenFooter = footerOriginal;
+    sheet.headerFooter.firstFooter = footerOriginal;
 
     // =========================
-    // CABEÇALHO
+    // HELPERS DO RELATÓRIO
     // =========================
+    function valorTexto(cell) {
+      const v = cell?.value;
 
-    sheet.mergeCells("A1:C3");
+      if (v === null || v === undefined) return "";
 
-    sheet.getCell("A1").value =
-`REL 06GQ09
-Versão: 00
-Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+      if (typeof v === "object") {
+        if (v.richText) return v.richText.map(t => t.text || "").join("");
+        if (v.text) return String(v.text);
+        if (v.result !== undefined) return String(v.result);
+        if (v.formula) return String(v.formula);
+      }
 
-    sheet.getCell("A1").alignment = {
-      vertical: "middle",
-      horizontal: "left",
-      wrapText: true
-    };
+      return String(v);
+    }
 
-    sheet.getCell("A1").font = {
-      bold: true,
-      size: 9,
-      name: "Arial"
-    };
+    function clonar(obj) {
+      return obj ? JSON.parse(JSON.stringify(obj)) : {};
+    }
 
-    sheet.mergeCells("D1:O3");
-
-    sheet.getCell("D1").value =
-"AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T";
-
-    sheet.getCell("D1").alignment = {
-      vertical: "middle",
-      horizontal: "center"
-    };
-
-    sheet.getCell("D1").font = {
-      bold: true,
-      size: 14,
-      name: "Arial"
-    };
-
-    // =========================
-    // BLOCO INSTRUMENTO
-    // =========================
-
-    sheet.mergeCells("A4:C4");
-    sheet.getCell("A4").value = "INSTRUMENTO";
-
-    sheet.mergeCells("D4:O4");
-    sheet.getCell("D4").value =
-"ESPECIFICAÇÕES TEMPERATURA / CRITÉRIOS DE ACEITAÇÃO";
-
-    ["A4", "D4"].forEach(c => {
-      sheet.getCell(c).font = {
-        bold: true,
-        size: 10,
-        name: "Arial"
+    function aplicarBorda(cell, style = "thin") {
+      cell.border = {
+        top: { style },
+        left: { style },
+        bottom: { style },
+        right: { style }
       };
+    }
 
-      sheet.getCell(c).alignment = {
+    function aplicarPadraoCelula(cell, baseStyle = null) {
+      if (baseStyle && Object.keys(baseStyle).length > 0) {
+        cell.style = clonar(baseStyle);
+      }
+
+      aplicarBorda(cell, "thin");
+
+      cell.alignment = {
         horizontal: "center",
-        vertical: "middle"
+        vertical: "middle",
+        wrapText: true
       };
 
-      sheet.getCell(c).fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "D9D9D9" }
+      cell.font = {
+        ...(cell.font || {}),
+        name: "Arial",
+        size: 8
       };
-    });
+    }
 
-    sheet.getCell("A5").value = "Marca: TESTO";
-    sheet.getCell("B5").value = "Modelo: 174T";
-    sheet.getCell("C5").value = "Resolução: 0,1";
-    const criterios = await buscarCriteriosCalibracao();
-    sheet.getCell("D5").value = `DMA: ${String(criterios.limite_dlt).replace(".", ",")}`;
-    sheet.getCell("E5").value = "Unidade: °C";
+    function numeroOuVazio(v) {
+      if (v === null || v === undefined || v === "") return "";
+      const n = Number(v);
+      return Number.isNaN(n) ? v : n;
+    }
 
-    // =========================
-    // CABEÇALHO TABELA
-    // =========================
+    function textoLinha(row) {
+      const valores = [];
 
-    const headerRow = 7;
+      row.eachCell({ includeEmpty: true }, cell => {
+        valores.push(valorTexto(cell));
+      });
 
-    sheet.getRow(headerRow).values = [
-      "N° Série",
-      "TAG",
-      "Calibrado em",
-      "Validade",
-      "Certificado",
-      "Incerteza",
-      "-20°C Erro",
-      "-20°C Resultado",
-      "0°C Erro",
-      "0°C Resultado",
-      "15°C Erro",
-      "15°C Resultado",
-      "60°C Erro",
-      "60°C Resultado",
-      "RESULTADO"
-    ];
+      return valores.join(" ").toUpperCase();
+    }
 
-    sheet.getRow(headerRow).height = 35;
+    function encontrarLinhaCabecalhoTabela() {
+      let melhor = 0;
 
-    sheet.getRow(headerRow).font = {
-      bold: true,
-      size: 9,
-      name: "Arial"
-    };
+      sheet.eachRow((row, rowNumber) => {
+        const t = textoLinha(row);
+        const temSerie = t.includes("SÉRIE") || t.includes("SERIE");
+        const temTag = t.includes("TAG") || t.includes("DLH");
+        const temCertificado = t.includes("CERTIFICADO");
+        const temResultado = t.includes("RESULTADO");
 
-    sheet.getRow(headerRow).alignment = {
-      horizontal: "center",
-      vertical: "middle",
-      wrapText: true
-    };
+        if (temSerie && temTag && (temCertificado || temResultado)) {
+          melhor = rowNumber;
+        }
+      });
 
-    sheet.getRow(headerRow).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "BFBFBF" }
-    };
+      return melhor || 7;
+    }
 
-    // =========================
-    // DADOS
-    // =========================
+    function encontrarLinhaAssinatura(aposLinha) {
+      let linhaEncontrada = 0;
 
-    dados.forEach(c => {
-      const pontos = Array.isArray(c.pontos) ? c.pontos : [];
+      sheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= aposLinha) return;
 
-      const p1 = pontos[0] || {};
-      const p2 = pontos[1] || {};
-      const p3 = pontos[2] || {};
-      const p4 = pontos[3] || {};
+        const t = textoLinha(row);
 
-      const row = sheet.addRow([
-        c.serie || "",
-        normalizarDLT(c.dlt) || "",
-        formatarDataISOParaBR(c.data),
-        c.mes_ano_validade || "",
-        c.certificado || "",
-        p1.incerteza ?? "",
-        p1.erro ?? "",
-        p1.soma ?? "",
-        p2.erro ?? "",
-        p2.soma ?? "",
-        p3.erro ?? "",
-        p3.soma ?? "",
-        p4.erro ?? "",
-        p4.soma ?? "",
-        c.status || ""
-      ]);
+        if (
+          t.includes("RESP") ||
+          t.includes("ASSIN") ||
+          t.includes("ELABORADO") ||
+          t.includes("REVISADO") ||
+          t.includes("APROVADO")
+        ) {
+          if (!linhaEncontrada || rowNumber < linhaEncontrada) {
+            linhaEncontrada = rowNumber;
+          }
+        }
+      });
 
-      row.height = 22;
+      return linhaEncontrada;
+    }
 
-      if (String(c.status || "").toUpperCase() === "APROVADO") {
-        row.getCell(15).fill = {
+    function atualizarCabecalhoModelo() {
+      sheet.eachRow(row => {
+        row.eachCell(cell => {
+          const t = valorTexto(cell).toUpperCase();
+
+          if (t.includes("DATA DO RELATÓRIO")) {
+            cell.value = `Data do relatório: ${formatarDataISOParaBR(dataRelatorio)}`;
+          }
+
+          if (t.startsWith("DATA:") || t === "DATA") {
+            cell.value = `Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+          }
+        });
+      });
+
+      const a1 = valorTexto(sheet.getCell("A1")).toUpperCase();
+
+      if (!a1 || a1.includes("REL")) {
+        sheet.getCell("A1").value =
+`REL 06GQ09
+Versão: 01
+Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+        sheet.getCell("A1").alignment = {
+          horizontal: "left",
+          vertical: "middle",
+          wrapText: true
+        };
+        sheet.getCell("A1").font = {
+          name: "Arial",
+          size: 8,
+          bold: true
+        };
+      }
+    }
+
+    function aplicarCorResultado(cell, valor) {
+      const texto = String(valor || "").toUpperCase();
+
+      if (texto === "APROVADO" || texto === "VÁLIDO" || texto === "VALIDO") {
+        cell.fill = {
           type: "pattern",
           pattern: "solid",
           fgColor: { argb: "C6EFCE" }
         };
+        cell.font = {
+          ...(cell.font || {}),
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "006100" }
+        };
       }
 
-      if (String(c.status || "").toUpperCase() === "REPROVADO") {
-        row.getCell(15).fill = {
+      if (texto === "REPROVADO" || texto === "ERRO" || texto === "VENCIDO") {
+        cell.fill = {
           type: "pattern",
           pattern: "solid",
           fgColor: { argb: "FFC7CE" }
         };
+        cell.font = {
+          ...(cell.font || {}),
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "9C0006" }
+        };
+      }
+    }
+
+    function aplicarCorSoma(cell, valor, limite) {
+      const n = Number(valor);
+      const limiteAceitacao = Number(limite);
+
+      if (Number.isNaN(n) || Number.isNaN(limiteAceitacao)) return;
+
+      if (n <= limiteAceitacao) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "C6EFCE" }
+        };
+        cell.font = {
+          ...(cell.font || {}),
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "006100" }
+        };
+      } else {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFC7CE" }
+        };
+        cell.font = {
+          ...(cell.font || {}),
+          name: "Arial",
+          size: 8,
+          bold: true,
+          color: { argb: "9C0006" }
+        };
+      }
+    }
+
+    atualizarCabecalhoModelo();
+
+    const headerRow = encontrarLinhaCabecalhoTabela();
+    const dataStartRow = headerRow + 1;
+    let footerStartRow = encontrarLinhaAssinatura(headerRow);
+
+    if (!footerStartRow) {
+      footerStartRow = Math.max(sheet.rowCount + 3, dataStartRow + 1);
+    }
+
+    const linhasDisponiveis = Math.max(footerStartRow - dataStartRow, 0);
+
+    if (dados.length > linhasDisponiveis) {
+      const quantidadeInserir = dados.length - linhasDisponiveis;
+      sheet.spliceRows(
+        footerStartRow,
+        0,
+        ...Array.from({ length: quantidadeInserir }, () => [])
+      );
+      footerStartRow += quantidadeInserir;
+    }
+
+    const baseStyle = clonar(sheet.getRow(dataStartRow).getCell(1).style);
+    const colCount = 27;
+
+    // Limpa somente a área de dados, preservando o cabeçalho e o rodapé/assinaturas do modelo.
+    for (let rowNumber = dataStartRow; rowNumber < footerStartRow; rowNumber++) {
+      const row = sheet.getRow(rowNumber);
+      row.height = 18;
+
+      for (let col = 1; col <= colCount; col++) {
+        const cell = row.getCell(col);
+        cell.value = "";
+        aplicarPadraoCelula(cell, baseStyle);
+      }
+    }
+
+    dados.forEach((c, index) => {
+      const rowNumber = dataStartRow + index;
+      const row = sheet.getRow(rowNumber);
+
+      const u = Array.isArray(c.pontos_umidade) ? c.pontos_umidade : [];
+      const t = Array.isArray(c.pontos_temperatura) ? c.pontos_temperatura : [];
+
+      const u1 = u[0] || {};
+      const u2 = u[1] || {};
+      const u3 = u[2] || {};
+
+      const t1 = t[0] || {};
+      const t2 = t[1] || {};
+      const t3 = t[2] || {};
+      const t4 = t[3] || {};
+
+      row.values = [
+        "",
+        c.serie || "",
+        normalizarDLH(c.dlh) || c.dlh || "",
+        formatarDataISOParaBR(c.data),
+        c.mes_ano_validade || "",
+        c.certificado || "",
+
+        numeroOuVazio(u1.erro),
+        numeroOuVazio(u1.incerteza),
+        numeroOuVazio(u1.soma),
+
+        numeroOuVazio(u2.erro),
+        numeroOuVazio(u2.incerteza),
+        numeroOuVazio(u2.soma),
+
+        numeroOuVazio(u3.erro),
+        numeroOuVazio(u3.incerteza),
+        numeroOuVazio(u3.soma),
+
+        numeroOuVazio(t1.erro),
+        numeroOuVazio(t1.incerteza),
+        numeroOuVazio(t1.soma),
+
+        numeroOuVazio(t2.erro),
+        numeroOuVazio(t2.incerteza),
+        numeroOuVazio(t2.soma),
+
+        numeroOuVazio(t3.erro),
+        numeroOuVazio(t3.incerteza),
+        numeroOuVazio(t3.soma),
+
+        numeroOuVazio(t4.erro),
+        numeroOuVazio(t4.incerteza),
+        numeroOuVazio(t4.soma),
+
+        c.status || ""
+      ];
+
+      row.height = 18;
+
+      for (let col = 1; col <= colCount; col++) {
+        const cell = row.getCell(col);
+        aplicarPadraoCelula(cell, baseStyle);
+
+        // Colunas de soma:
+        // Umidade: 8, 11, 14 → limite dinâmico de umidade.
+        // Temperatura: 17, 20, 23, 26 → limite dinâmico de temperatura.
+        if ([8, 11, 14].includes(col)) {
+          aplicarCorSoma(cell, cell.value, limiteUmidadeRelatorio);
+        }
+
+        if ([17, 20, 23, 26].includes(col)) {
+          aplicarCorSoma(cell, cell.value, limiteTemperaturaRelatorio);
+        }
+
+        if (col === 27) {
+          aplicarCorResultado(cell, cell.value);
+        }
       }
     });
 
-    // =========================
-    // LARGURA COLUNAS
-    // =========================
+    if (dados.length === 0) {
+      const row = sheet.getRow(dataStartRow);
+      row.getCell(1).value = "Nenhum certificado DLH processado na data selecionada.";
+      row.getCell(1).alignment = {
+        horizontal: "center",
+        vertical: "middle",
+        wrapText: true
+      };
+      row.getCell(1).font = {
+        name: "Arial",
+        size: 9,
+        italic: true
+      };
+    }
 
-    const larguras = [
-      16,
-      14,
-      16,
-      16,
-      18,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      14
-    ];
+    // Repetição de cabeçalho e área de impressão.
+    sheet.pageSetup.printTitlesRow = `1:${headerRow}`;
 
-    larguras.forEach((w, i) => {
-      sheet.getColumn(i + 1).width = w;
-    });
-
-    // =========================
-    // ESTILO GERAL
-    // =========================
-
-    sheet.eachRow((row, rowNumber) => {
-      row.eachCell(cell => {
-        cell.border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" }
-        };
-
-        cell.alignment = {
-          horizontal: "center",
-          vertical: "middle",
-          wrapText: true
-        };
-
-        if (rowNumber > headerRow) {
-          cell.font = {
-            name: "Arial",
-            size: 8
-          };
-        }
-      });
-    });
-
-    // =========================
-    // CONGELAR CABEÇALHO
-    // =========================
+    const ultimaLinhaComDados = dataStartRow + Math.max(dados.length, 1) - 1;
+    const ultimaLinha = Math.max(footerStartRow + 6, ultimaLinhaComDados + 8, sheet.rowCount);
+    sheet.pageSetup.printArea = `A1:AA${ultimaLinha}`;
 
     sheet.views = [
       {
         state: "frozen",
-        ySplit: 7
+        ySplit: headerRow
       }
     ];
 
-    // =========================
-    // RODAPÉ
-    // =========================
-
-    sheet.headerFooter.oddFooter =
-"&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
-
-    // =========================
-    // NOME ARQUIVO
-    // =========================
-
-    const nomeArquivo =
-`RELATORIO_DIARIO_174T_${dataRelatorio}.xlsx`;
+    const nomeArquivo = `RELATORIO_DIARIO_DLH_${dataRelatorio}.xlsx`;
 
     res.setHeader(
       "Content-Type",
@@ -3235,9 +3151,7 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
     );
 
     await workbook.xlsx.write(res);
-
     return res.end();
-
   } catch (e) {
     console.error(e);
 
@@ -3247,18 +3161,56 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
   }
 });
 
-app.get("/relatorio-dia", async (req, res) => {
-  res.redirect("/relatorio-dia/html");
+app.get("/dlh/exportar-csv", async (req, res) => {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=data.desc`,
+      { headers: supabaseHeaders() }
+    );
+
+    const data = await r.json();
+
+    const linhas = [
+      [
+        "DLH",
+        "Serie",
+        "Data",
+        "Validade",
+        "Certificado",
+        "Status",
+        "Divergente",
+        "Duplicado"
+      ],
+      ...(Array.isArray(data) ? data : []).map(d => [
+        d.dlh || "",
+        d.serie || "",
+        formatarDataISOParaBR(d.data),
+        d.mes_ano_validade || "",
+        d.certificado || "",
+        d.status || "",
+        d.divergente ? "SIM" : "NÃO",
+        d.duplicado ? "SIM" : "NÃO"
+      ])
+    ];
+
+    const csv = linhas
+      .map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(";"))
+      .join("\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", "attachment; filename=certificados_dlh.csv");
+    res.send("\uFEFF" + csv);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor DLT rodando na porta ${PORT} 🚀`);
+  console.log(`Servidor DLH rodando na porta ${PORT} 🚀`);
 
   if (AUTO_SYNC_ENABLED) {
     setTimeout(() => {
-      executarSyncEmBackground().catch(e => {
-        console.log("Erro ao iniciar sincronização automática:", e.message);
-      });
+      executarSyncAutomaticoDLH();
     }, AUTO_SYNC_START_DELAY_MS);
   }
 
@@ -3266,7 +3218,7 @@ app.listen(PORT, () => {
     verificarAgendaMetricas();
     setInterval(() => {
       verificarAgendaMetricas().catch(e => {
-        console.log("Erro na agenda de métricas DLT:", e.message);
+        console.log("Erro na agenda de métricas DLH:", e.message);
       });
     }, 60000);
   }
