@@ -42,6 +42,8 @@ const LOGO_URL = process.env.LOGO_URL || "";
 const LIMITE = Number(process.env.LIMITE || 50);
 const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
 const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
+const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
+const AUTO_SYNC_START_DELAY_MS = Number(process.env.AUTO_SYNC_START_DELAY_MS || 15000);
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -64,6 +66,7 @@ const CERTIFICADOS_LISTA_SELECT = [
 let statusCache = { expiraEm: 0, valor: null };
 let idsBancoCache = { expiraEm: 0, valor: null };
 let idsExcluidosCache = { expiraEm: 0, valor: null };
+let syncLocalEmExecucao = false;
 
 // =========================
 // GOOGLE DRIVE AUTH
@@ -1238,11 +1241,21 @@ async function processarPDF(fileId) {
 // CONTROLE / HISTÓRICO
 // =========================
 async function atualizarControleSync(payload) {
-  await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?id=eq.1`, {
-    method: "PATCH",
-    headers: supabaseHeaders(),
-    body: JSON.stringify(payload)
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      ...supabaseHeaders(),
+      Prefer: "resolution=merge-duplicates,return=minimal"
+    },
+    body: JSON.stringify({ id: 1, ...payload })
   });
+
+  if (!response.ok) {
+    const detalhe = await response.text();
+    throw new Error(`Falha ao atualizar controle_sync: ${detalhe}`);
+  }
+
+  invalidarCaches();
 }
 
 async function buscarControleSync() {
@@ -1370,16 +1383,20 @@ async function buscarArquivosDrive() {
 // EXECUÇÃO DE SYNC EM BACKGROUND
 // =========================
 async function executarSyncEmBackground() {
-  try {
-    await atualizarControleSync({
-      em_execucao: true,
-      ultima_execucao: new Date().toISOString(),
-      total_processados: 0
-    });
+  if (syncLocalEmExecucao) return;
+  syncLocalEmExecucao = true;
+  let deveContinuar = false;
 
+  try {
     const idsBanco = await buscarIdsBanco();
     const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
+
+    await atualizarControleSync({
+      em_execucao: true,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: idsBanco.size
+    });
 
     let processados = 0;
 
@@ -1446,7 +1463,7 @@ async function executarSyncEmBackground() {
         await atualizarControleSync({
           em_execucao: true,
           ultima_execucao: new Date().toISOString(),
-          total_processados: processados
+          total_processados: idsBanco.size
         });
       } catch (e) {
         console.log("Erro ao processar arquivo:", f.name, e.message);
@@ -1463,21 +1480,27 @@ async function executarSyncEmBackground() {
     await atualizarControleSync({
       em_execucao: false,
       ultima_execucao: new Date().toISOString(),
-      total_processados: processados
+      total_processados: idsBancoAtualizado.size
     });
 
-    if (faltantesRestantes > 0) {
-      setTimeout(() => {
-        executarSyncEmBackground();
-      }, 3000);
-    }
+    deveContinuar = faltantesRestantes > 0 && processados > 0;
   } catch (e) {
     console.log("Erro geral executarSyncEmBackground:", e.message);
 
-    await atualizarControleSync({
-      em_execucao: false,
-      ultima_execucao: new Date().toISOString()
-    });
+    try {
+      await atualizarControleSync({
+        em_execucao: false,
+        ultima_execucao: new Date().toISOString()
+      });
+    } catch (controleErro) {
+      console.log("Erro ao finalizar controle_sync:", controleErro.message);
+    }
+  } finally {
+    syncLocalEmExecucao = false;
+
+    if (deveContinuar) {
+      setTimeout(() => executarSyncEmBackground(), 3000);
+    }
   }
 }
 
@@ -2492,4 +2515,14 @@ app.get("/relatorio-dia", async (req, res) => {
   res.redirect("/relatorio-dia/html");
 });
 
-app.listen(PORT, () => console.log(`Servidor DLT rodando na porta ${PORT} 🚀`));
+app.listen(PORT, () => {
+  console.log(`Servidor DLT rodando na porta ${PORT} 🚀`);
+
+  if (AUTO_SYNC_ENABLED) {
+    setTimeout(() => {
+      executarSyncEmBackground().catch(e => {
+        console.log("Erro ao iniciar sincronização automática:", e.message);
+      });
+    }, AUTO_SYNC_START_DELAY_MS);
+  }
+});
