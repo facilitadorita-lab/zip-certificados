@@ -1633,6 +1633,38 @@ async function contarCertificadosBancoDLH() {
   return contarTabela("certificados_dlh");
 }
 
+async function atualizarControleSyncDLH(payload) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/controle_sync?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      ...supabaseHeaders(),
+      Prefer: "resolution=merge-duplicates,return=minimal"
+    },
+    body: JSON.stringify({ id: 2, ...payload })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Falha ao atualizar controle_sync DLH: ${await response.text()}`);
+  }
+
+  invalidarCachesDLH();
+}
+
+async function buscarControleSyncDLH() {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/controle_sync?id=eq.2&select=id,total_processados,ultima_execucao,em_execucao`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, "Supabase controle_sync DLH");
+  return registros[0] || null;
+}
+
+function execucaoTravadaDLH(controle) {
+  if (!controle?.em_execucao || !controle?.ultima_execucao) return false;
+  return Date.now() - new Date(controle.ultima_execucao).getTime() > 5 * 60 * 1000;
+}
+
 // =========================
 // SYNC
 // =========================
@@ -1717,6 +1749,12 @@ async function executarSyncDLH() {
       idsBanco.add(f.id);
       processados++;
       invalidarCachesDLH();
+
+      await atualizarControleSyncDLH({
+        em_execucao: true,
+        ultima_execucao: new Date().toISOString(),
+        total_processados: idsBanco.size
+      });
     } catch (e) {
       erros.push({
         arquivo: f.name,
@@ -1738,11 +1776,33 @@ async function executarSyncAutomaticoDLH() {
   let deveContinuar = false;
 
   try {
+    const totalInicial = await contarCertificadosBancoDLH();
+    await atualizarControleSyncDLH({
+      em_execucao: true,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: totalInicial
+    });
+
     const resultado = await executarSyncDLH();
     invalidarCachesDLH();
     deveContinuar = resultado.processados > 0;
+
+    const totalAtual = await contarCertificadosBancoDLH();
+    await atualizarControleSyncDLH({
+      em_execucao: false,
+      ultima_execucao: new Date().toISOString(),
+      total_processados: totalAtual
+    });
   } catch (e) {
     console.log("Erro na sincronização automática DLH:", e.message);
+    try {
+      await atualizarControleSyncDLH({
+        em_execucao: false,
+        ultima_execucao: new Date().toISOString()
+      });
+    } catch (controleErro) {
+      console.log("Erro ao finalizar controle_sync DLH:", controleErro.message);
+    }
   } finally {
     syncLocalDLHEmExecucao = false;
     if (deveContinuar) {
@@ -1984,6 +2044,15 @@ app.get("/dlh/status", async (req, res) => {
       return res.json(statusCacheDLH.valor);
     }
 
+    let controle = await buscarControleSyncDLH();
+    if (execucaoTravadaDLH(controle)) {
+      await atualizarControleSyncDLH({
+        em_execucao: false,
+        ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
+      });
+      controle = { ...controle, em_execucao: false };
+    }
+
     const totalBanco = await contarCertificadosBancoDLH();
     const totalExcluidos = await contarTabela("certificados_dlh_excluidos");
     const arquivosDrive = await buscarArquivosDriveDLH();
@@ -1992,6 +2061,10 @@ app.get("/dlh/status", async (req, res) => {
     const faltantes = Math.max(0, totalDrive - totalBanco - totalExcluidos);
 
     const payload = {
+      id: 2,
+      total_processados: controle?.total_processados ?? totalBanco,
+      em_execucao: controle?.em_execucao || false,
+      ultima_execucao: controle?.ultima_execucao || null,
       total_drive: totalDrive,
       total_banco: totalBanco,
       faltantes
