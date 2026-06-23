@@ -2082,7 +2082,19 @@ app.get("/status", async (req, res) => {
       return res.json(statusCache.valor);
     }
 
-    const controle = await buscarControleSync();
+    let controle = await buscarControleSync();
+
+    if (execucaoTravada(controle)) {
+      await atualizarControleSync({
+        em_execucao: false,
+        ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
+      });
+      controle = {
+        ...controle,
+        em_execucao: false
+      };
+    }
+
     const totalBanco = await contarCertificadosBanco();
     const totalExcluidos = await contarTabela("certificados_excluidos");
     const arquivosDrive = await buscarArquivosDrive();
