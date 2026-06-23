@@ -1590,6 +1590,27 @@ app.get("/certificados", async (req, res) => {
   }
 });
 
+app.get("/certificados/:id/detalhes", async (req, res) => {
+  try {
+    const id = encodeURIComponent(req.params.id);
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?id=eq.${id}&select=id,pontos,status,certificado,data,vencimento`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase detalhes do certificado");
+
+    if (!registros.length) {
+      return res.status(404).json({ erro: "Certificado não encontrado" });
+    }
+
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.json(registros[0]);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/divergentes", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 100);
