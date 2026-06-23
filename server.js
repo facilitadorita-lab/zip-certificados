@@ -56,6 +56,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const INVITE_REDIRECT_URL = process.env.INVITE_REDIRECT_URL || "";
+const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -291,7 +292,14 @@ function papeisPermitidos(req) {
 }
 
 app.use(async (req, res, next) => {
-  if (!AUTH_ENABLED || req.method === "OPTIONS" || req.path === "/") return next();
+  if (
+    !AUTH_ENABLED ||
+    req.method === "OPTIONS" ||
+    req.path === "/" ||
+    req.path.startsWith("/automacao/")
+  ) {
+    return next();
+  }
 
   try {
     const authorization = String(req.headers.authorization || "");
@@ -307,6 +315,27 @@ app.use(async (req, res, next) => {
     res.status(401).json({ erro: e.message });
   }
 });
+
+function validarSegredoAutomacao(req, res) {
+  const recebido = String(req.headers["x-automation-secret"] || "");
+  if (!AUTOMATION_SECRET || !recebido) {
+    res.status(401).json({ erro: "Automação não autorizada" });
+    return false;
+  }
+
+  const esperadoBuffer = Buffer.from(AUTOMATION_SECRET);
+  const recebidoBuffer = Buffer.from(recebido);
+  const valido =
+    esperadoBuffer.length === recebidoBuffer.length &&
+    crypto.timingSafeEqual(esperadoBuffer, recebidoBuffer);
+
+  if (!valido) {
+    res.status(401).json({ erro: "Automação não autorizada" });
+    return false;
+  }
+
+  return true;
+}
 
 function validarConfiguracaoBasica() {
   if (!SUPABASE_URL) throw new Error("SUPABASE_URL não configurada no Render");
@@ -654,6 +683,22 @@ async function buscarCertificadosPorPeriodoEmLotes({
   }
 
   return resultados;
+}
+
+function montarResultadoBuscaLista(registros, equipamentosInformados, campoEquipamento, normalizador) {
+  const solicitados = [...new Set(equipamentosInformados.map(normalizador).filter(Boolean))];
+  const encontradosSet = new Set(
+    registros.map(item => normalizador(item[campoEquipamento])).filter(Boolean)
+  );
+
+  return {
+    total_equipamentos_informados: solicitados.length,
+    total_equipamentos_encontrados: encontradosSet.size,
+    total_certificados_encontrados: registros.length,
+    equipamentos_encontrados: solicitados.filter(item => encontradosSet.has(item)),
+    equipamentos_nao_encontrados: solicitados.filter(item => !encontradosSet.has(item)),
+    registros
+  };
 }
 
 async function buscarCertificadosPorIdsEmLotes(tabela, campos, ids) {
@@ -1861,6 +1906,55 @@ app.get("/auth/me", (req, res) => {
   });
 });
 
+app.get("/automacao/status", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  try {
+    let controle = await buscarControleSync();
+    if (execucaoTravada(controle)) {
+      await atualizarControleSync({
+        em_execucao: false,
+        ultima_execucao: controle?.ultima_execucao || new Date().toISOString()
+      });
+      controle = { ...controle, em_execucao: false };
+    }
+
+    const [totalBanco, totalExcluidos, arquivosDrive] = await Promise.all([
+      contarCertificadosBanco(),
+      contarTabela("certificados_excluidos"),
+      buscarArquivosDrive()
+    ]);
+    const totalDrive = arquivosDrive.length;
+
+    res.json({
+      modulo: "DLT",
+      em_execucao: controle?.em_execucao || syncLocalEmExecucao,
+      ultima_execucao: controle?.ultima_execucao || null,
+      total_drive: totalDrive,
+      total_banco: totalBanco,
+      faltantes: Math.max(0, totalDrive - totalBanco - totalExcluidos)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/automacao/sincronizar", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  try {
+    const controle = await buscarControleSync();
+    if (syncLocalEmExecucao || (controle?.em_execucao && !execucaoTravada(controle))) {
+      return res.json({ iniciado: false, modulo: "DLT", mensagem: "DLT já está processando" });
+    }
+
+    res.status(202).json({ iniciado: true, modulo: "DLT", mensagem: "Sincronização DLT iniciada" });
+    executarSyncEmBackground();
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/usuarios", async (req, res) => {
   try {
     const response = await fetch(
@@ -2184,6 +2278,51 @@ app.get("/certificados", async (req, res) => {
     const data = await r.json();
     res.setHeader("Cache-Control", "private, max-age=30");
     res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || 0), registros: data });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/certificados/busca-lista", async (req, res) => {
+  try {
+    const equipamentos = Array.isArray(req.body?.equipamentos)
+      ? req.body.equipamentos.map(String).filter(Boolean)
+      : normalizarListaQuery(req.body?.equipamentos || req.body?.lista);
+    const testeInicio = normalizarDataQuery(
+      req.body?.teste_inicio || req.body?.data_inicio || req.body?.inicio
+    );
+    const testeFim = normalizarDataQuery(
+      req.body?.teste_fim || req.body?.data_fim || req.body?.fim
+    );
+
+    const unicos = [...new Set(equipamentos.map(normalizarDLT).filter(Boolean))];
+    if (!unicos.length) {
+      return res.status(400).json({ erro: "Informe ao menos um equipamento DLT" });
+    }
+    if (unicos.length > 500) {
+      return res.status(400).json({
+        erro: "O limite é de 500 equipamentos por busca",
+        total_informado: unicos.length
+      });
+    }
+    if (!testeInicio || !testeFim) {
+      return res.status(400).json({ erro: "Informe teste_inicio e teste_fim" });
+    }
+
+    const registros = await buscarCertificadosPorPeriodoEmLotes({
+      tabela: "certificados",
+      campoEquipamento: "dlt",
+      equipamentos: unicos,
+      testeInicio,
+      testeFim
+    });
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      teste_inicio: testeInicio,
+      teste_fim: testeFim,
+      ...montarResultadoBuscaLista(registros, unicos, "dlt", normalizarDLT)
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
