@@ -12,6 +12,7 @@ import crypto from "crypto";
 import zlib from "zlib";
 import archiver from "archiver";
 import dns from "dns";
+import { createClient } from "@supabase/supabase-js";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -51,6 +52,10 @@ const METRICS_START_TIME = process.env.METRICS_START_TIME || "07:30";
 const METRICS_END_TIME = process.env.METRICS_END_TIME || "20:00";
 const METRICS_INTERVAL_MINUTES = Number(process.env.METRICS_INTERVAL_MINUTES || 120);
 const METRICS_RETENTION_DAYS = Number(process.env.METRICS_RETENTION_DAYS || 90);
+const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
+const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
+const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
+const INVITE_REDIRECT_URL = process.env.INVITE_REDIRECT_URL || "";
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -78,6 +83,15 @@ let criteriosCache = { expiraEm: 0, valor: null };
 let metricasFlushEmExecucao = false;
 let ultimoSlotMetricas = "";
 let ultimaLimpezaMetricas = "";
+const authCache = new Map();
+const profileCache = new Map();
+
+const supabaseAdmin =
+  SUPABASE_URL && SUPABASE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+        auth: { persistSession: false, autoRefreshToken: false }
+      })
+    : null;
 
 function novasMetricas() {
   return {
@@ -210,6 +224,89 @@ function supabaseHeaders() {
 
   return headers;
 }
+
+function limparCachesAuth() {
+  const agora = Date.now();
+  for (const [chave, item] of authCache) {
+    if (item.expiraEm <= agora) authCache.delete(chave);
+  }
+  for (const [chave, item] of profileCache) {
+    if (item.expiraEm <= agora) profileCache.delete(chave);
+  }
+}
+
+async function buscarPerfilUsuario(user) {
+  const cache = profileCache.get(user.id);
+  if (cache?.expiraEm > Date.now()) return cache.valor;
+
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, "Supabase perfil");
+  const perfil = registros[0] || null;
+
+  if (!perfil) throw new Error("Perfil de acesso não encontrado");
+  profileCache.set(user.id, { valor: perfil, expiraEm: Date.now() + PROFILE_CACHE_MS });
+  return perfil;
+}
+
+async function autenticarToken(token) {
+  limparCachesAuth();
+  const cache = authCache.get(token);
+  if (cache?.expiraEm > Date.now()) return cache.valor;
+  if (!supabaseAdmin) throw new Error("Supabase Auth não configurado");
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error || !data?.user) throw new Error("Sessão inválida ou expirada");
+
+  const perfil = await buscarPerfilUsuario(data.user);
+  if (!perfil.ativo) throw new Error("Usuário desativado");
+
+  const auth = { user: data.user, perfil };
+  authCache.set(token, { valor: auth, expiraEm: Date.now() + AUTH_CACHE_MS });
+  return auth;
+}
+
+function papeisPermitidos(req) {
+  const rota = req.path;
+  const metodo = req.method;
+
+  if (rota.startsWith("/metricas")) return ["dev"];
+  if (rota.startsWith("/usuarios")) return ["dev", "administrador"];
+  if (
+    metodo === "DELETE" ||
+    rota === "/sync" ||
+    rota === "/reprocess" ||
+    (rota === "/criterios" && metodo === "PATCH")
+  ) {
+    return ["dev", "administrador"];
+  }
+  if (metodo === "POST" && rota.startsWith("/downloads/")) {
+    return ["dev", "administrador", "usuario"];
+  }
+
+  return ["dev", "administrador", "usuario", "auditor"];
+}
+
+app.use(async (req, res, next) => {
+  if (!AUTH_ENABLED || req.method === "OPTIONS" || req.path === "/") return next();
+
+  try {
+    const authorization = String(req.headers.authorization || "");
+    const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+    if (!token) return res.status(401).json({ erro: "Autenticação obrigatória" });
+
+    req.auth = await autenticarToken(token);
+    if (!papeisPermitidos(req).includes(req.auth.perfil.role)) {
+      return res.status(403).json({ erro: "Você não possui permissão para esta ação" });
+    }
+    next();
+  } catch (e) {
+    res.status(401).json({ erro: e.message });
+  }
+});
 
 function validarConfiguracaoBasica() {
   if (!SUPABASE_URL) throw new Error("SUPABASE_URL não configurada no Render");
@@ -1752,6 +1849,116 @@ async function executarSyncEmBackground() {
 // =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
+});
+
+app.get("/auth/me", (req, res) => {
+  res.json({
+    user: {
+      id: req.auth.user.id,
+      email: req.auth.user.email
+    },
+    perfil: req.auth.perfil
+  });
+});
+
+app.get("/usuarios", async (req, res) => {
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,criado_em,ultimo_acesso&order=criado_em.desc`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase usuários");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ total: registros.length, registros });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/usuarios/convidar", async (req, res) => {
+  try {
+    if (!supabaseAdmin) throw new Error("Supabase Auth não configurado");
+
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const nome = String(req.body?.nome || "").trim();
+    const role = String(req.body?.role || "usuario").trim();
+    const rolesValidas = ["dev", "administrador", "usuario", "auditor"];
+
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ erro: "Informe um e-mail válido" });
+    }
+    if (!rolesValidas.includes(role)) {
+      return res.status(400).json({ erro: "Perfil de acesso inválido" });
+    }
+    if (req.auth.perfil.role !== "dev" && role === "dev") {
+      return res.status(403).json({ erro: "Somente DEV pode convidar outro DEV" });
+    }
+
+    const options = {
+      data: { nome: nome || email.split("@")[0], role }
+    };
+    if (INVITE_REDIRECT_URL) options.redirectTo = INVITE_REDIRECT_URL;
+
+    const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, options);
+    if (error) return res.status(400).json({ erro: error.message });
+
+    res.status(201).json({
+      sucesso: true,
+      mensagem: "Convite enviado",
+      usuario: { id: data.user?.id, email, nome, role }
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.patch("/usuarios/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const busca = await fetch(
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo`,
+      { headers: supabaseHeaders() }
+    );
+    const atualData = validarListaSupabase(busca, await busca.json(), "Supabase usuário");
+    const atual = atualData[0];
+    if (!atual) return res.status(404).json({ erro: "Usuário não encontrado" });
+
+    const solicitanteDev = req.auth.perfil.role === "dev";
+    const role = req.body?.role === undefined ? atual.role : String(req.body.role);
+    const ativo = req.body?.ativo === undefined ? atual.ativo : Boolean(req.body.ativo);
+    const nome = req.body?.nome === undefined ? atual.nome : String(req.body.nome).trim();
+
+    if (!["dev", "administrador", "usuario", "auditor"].includes(role)) {
+      return res.status(400).json({ erro: "Perfil de acesso inválido" });
+    }
+    if (!solicitanteDev && (atual.role === "dev" || role === "dev")) {
+      return res.status(403).json({ erro: "Somente DEV pode alterar um perfil DEV" });
+    }
+    if (id === req.auth.user.id && !ativo) {
+      return res.status(400).json({ erro: "Você não pode desativar o próprio usuário" });
+    }
+
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { ...supabaseHeaders(), Prefer: "return=representation" },
+        body: JSON.stringify({ nome, role, ativo })
+      }
+    );
+    const registros = validarListaSupabase(
+      response,
+      await response.json(),
+      "Supabase atualização do usuário"
+    );
+
+    profileCache.delete(id);
+    authCache.clear();
+    res.json({ sucesso: true, usuario: registros[0] });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.get("/criterios", async (req, res) => {
