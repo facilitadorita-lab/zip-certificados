@@ -45,6 +45,9 @@ const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g
 const LIMITE = Number(process.env.LIMITE_DLH || 50);
 const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
 const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
+const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
+const AUTO_SYNC_START_DELAY_MS = Number(process.env.AUTO_SYNC_START_DELAY_MS || 15000);
+const CRITERIOS_CACHE_MS = Number(process.env.CRITERIOS_CACHE_MS || 600000);
 const CERTIFICADOS_DLH_LISTA_SELECT = [
   "id", "nome_original", "nome_download", "dlh", "serie", "data",
   "certificado", "status", "validade", "vencimento", "mes_ano_validade",
@@ -54,6 +57,8 @@ const CERTIFICADOS_DLH_LISTA_SELECT = [
 let statusCacheDLH = { expiraEm: 0, valor: null };
 let idsBancoCacheDLH = { expiraEm: 0, valor: null };
 let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
+let syncLocalDLHEmExecucao = false;
+let criteriosCacheDLH = { expiraEm: 0, valor: null };
 
 
 // =========================
@@ -1133,26 +1138,29 @@ async function extrairTabelaDLH(buffer) {
 // CRITÉRIOS DE ACEITAÇÃO
 // =========================
 async function buscarCriteriosCalibracao() {
+  if (criteriosCacheDLH.valor && criteriosCacheDLH.expiraEm > Date.now()) {
+    return criteriosCacheDLH.valor;
+  }
+
   try {
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/criterios_calibracao?select=*&order=id.desc&limit=1`,
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.1&select=id,limite_temperatura,limite_umidade,atualizado_em`,
       { headers: supabaseHeaders() }
     );
 
     const data = await r.json();
-
-    if (!Array.isArray(data) || data.length === 0) {
-      return {
-        limite_temperatura: 0.5,
-        limite_umidade: 5.0
-      };
-    }
-
-    return {
+    const registros = validarListaSupabase(r, data, "Supabase critérios DLH");
+    const criterios = {
       limite_temperatura: Number(data[0].limite_temperatura ?? 0.5),
       limite_umidade: Number(data[0].limite_umidade ?? 5.0),
       atualizado_em: data[0].atualizado_em || null
     };
+
+    criteriosCacheDLH = {
+      valor: criterios,
+      expiraEm: Date.now() + CRITERIOS_CACHE_MS
+    };
+    return criterios;
   } catch (e) {
     console.log("Erro ao buscar critérios de calibração, usando padrão:", e.message);
 
@@ -1413,6 +1421,25 @@ async function executarSyncDLH() {
   };
 }
 
+async function executarSyncAutomaticoDLH() {
+  if (syncLocalDLHEmExecucao) return;
+  syncLocalDLHEmExecucao = true;
+  let deveContinuar = false;
+
+  try {
+    const resultado = await executarSyncDLH();
+    invalidarCachesDLH();
+    deveContinuar = resultado.processados > 0;
+  } catch (e) {
+    console.log("Erro na sincronização automática DLH:", e.message);
+  } finally {
+    syncLocalDLHEmExecucao = false;
+    if (deveContinuar) {
+      setTimeout(() => executarSyncAutomaticoDLH(), 3000);
+    }
+  }
+}
+
 // =========================
 // REPROCESSAMENTO
 // =========================
@@ -1516,6 +1543,7 @@ app.get("/", (req, res) => {
 app.get("/dlh/criterios", async (req, res) => {
   try {
     const criterios = await buscarCriteriosCalibracao();
+    res.setHeader("Cache-Control", "private, max-age=300");
     res.json(criterios);
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -1524,74 +1552,86 @@ app.get("/dlh/criterios", async (req, res) => {
 
 app.patch("/dlh/criterios", async (req, res) => {
   try {
-    const limiteTemperatura = Number(req.body.limite_temperatura);
-    const limiteUmidade = Number(req.body.limite_umidade);
+    const limiteTemperatura = Number(req.body?.limite_temperatura);
+    const limiteUmidade = Number(req.body?.limite_umidade);
+    const alteradoPor = String(req.body?.alterado_por || "").trim() || null;
 
-    if (Number.isNaN(limiteTemperatura) || limiteTemperatura <= 0) {
-      return res.status(400).json({ erro: "limite_temperatura deve ser maior que zero." });
+    if (!Number.isFinite(limiteTemperatura) || limiteTemperatura <= 0 || limiteTemperatura > 100) {
+      return res.status(400).json({ erro: "limite_temperatura deve ser maior que zero e menor ou igual a 100." });
     }
 
-    if (Number.isNaN(limiteUmidade) || limiteUmidade <= 0) {
-      return res.status(400).json({ erro: "limite_umidade deve ser maior que zero." });
+    if (!Number.isFinite(limiteUmidade) || limiteUmidade <= 0 || limiteUmidade > 100) {
+      return res.status(400).json({ erro: "limite_umidade deve ser maior que zero e menor ou igual a 100." });
     }
 
-    const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/criterios_calibracao?select=id&order=id.desc&limit=1`,
-      { headers: supabaseHeaders() }
+    const anterior = await buscarCriteriosCalibracao();
+    const atualizadoEm = new Date().toISOString();
+    const resposta = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?on_conflict=id`,
+      {
+        method: "POST",
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "resolution=merge-duplicates,return=representation"
+        },
+        body: JSON.stringify({
+          id: 1,
+          limite_temperatura: limiteTemperatura,
+          limite_umidade: limiteUmidade,
+          atualizado_em: atualizadoEm
+        })
+      }
     );
-
-    const registros = await busca.json();
-    const existente = Array.isArray(registros) && registros.length > 0 ? registros[0] : null;
-
-    let resposta;
-
-    if (existente?.id) {
-      resposta = await fetch(
-        `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.${existente.id}`,
-        {
-          method: "PATCH",
-          headers: {
-            ...supabaseHeaders(),
-            Prefer: "return=representation"
-          },
-          body: JSON.stringify({
-            limite_temperatura: limiteTemperatura,
-            limite_umidade: limiteUmidade,
-            atualizado_em: new Date().toISOString()
-          })
-        }
-      );
-    } else {
-      resposta = await fetch(
-        `${SUPABASE_URL}/rest/v1/criterios_calibracao`,
-        {
-          method: "POST",
-          headers: {
-            ...supabaseHeaders(),
-            Prefer: "return=representation"
-          },
-          body: JSON.stringify({
-            limite_temperatura: limiteTemperatura,
-            limite_umidade: limiteUmidade,
-            atualizado_em: new Date().toISOString()
-          })
-        }
-      );
-    }
-
-    if (!resposta.ok) {
-      return res.status(500).json({ erro: await resposta.text() });
-    }
-
     const data = await resposta.json();
+    const registros = validarListaSupabase(resposta, data, "Supabase atualização do DMA DLH");
+
+    const historico = await fetch(`${SUPABASE_URL}/rest/v1/criterios_calibracao_historico`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        modulo: "DLH",
+        limite_temperatura_anterior: anterior.limite_temperatura,
+        limite_temperatura_novo: limiteTemperatura,
+        limite_umidade_anterior: anterior.limite_umidade,
+        limite_umidade_novo: limiteUmidade,
+        alterado_por: alteradoPor,
+        alterado_em: atualizadoEm
+      })
+    });
+    if (!historico.ok) {
+      throw new Error(`DMA atualizado, mas houve falha ao gravar histórico: ${await historico.text()}`);
+    }
+
+    criteriosCacheDLH = {
+      valor: {
+        limite_temperatura: limiteTemperatura,
+        limite_umidade: limiteUmidade,
+        atualizado_em: atualizadoEm
+      },
+      expiraEm: Date.now() + CRITERIOS_CACHE_MS
+    };
 
     res.json({
       sucesso: true,
-      criterios: Array.isArray(data) && data.length ? data[0] : {
-        limite_temperatura: limiteTemperatura,
-        limite_umidade: limiteUmidade
-      }
+      criterios: registros[0],
+      reprocessamento_automatico: false
     });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/criterios/historico", async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao_historico?modulo=eq.DLH&select=id,limite_temperatura_anterior,limite_temperatura_novo,limite_umidade_anterior,limite_umidade_novo,alterado_por,alterado_em&order=alterado_em.desc&limit=${limit}`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase histórico DMA DLH");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ total: registros.length, registros });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -1664,8 +1704,12 @@ app.get("/dlh/status/google", async (req, res) => {
 
 app.get("/dlh/sync", async (req, res) => {
   try {
-    const resultado = await executarSyncDLH();
-    res.json(resultado);
+    if (syncLocalDLHEmExecucao) {
+      return res.json({ mensagem: "Processamento DLH já está em execução" });
+    }
+
+    res.status(202).json({ mensagem: "Processamento DLH iniciado" });
+    executarSyncAutomaticoDLH();
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -2585,4 +2629,12 @@ app.get("/dlh/exportar-csv", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Servidor DLH rodando na porta ${PORT} 🚀`));
+app.listen(PORT, () => {
+  console.log(`Servidor DLH rodando na porta ${PORT} 🚀`);
+
+  if (AUTO_SYNC_ENABLED) {
+    setTimeout(() => {
+      executarSyncAutomaticoDLH();
+    }, AUTO_SYNC_START_DELAY_MS);
+  }
+});
