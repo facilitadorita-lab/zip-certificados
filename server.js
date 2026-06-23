@@ -19,10 +19,27 @@ dns.setDefaultResultOrder("ipv4first");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", process.env.CORS_ORIGIN || "*");
+  const origem = String(req.headers.origin || "");
+  const origensPermitidas = String(process.env.CORS_ORIGIN || "*")
+    .split(",")
+    .map(item => item.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  const origemNormalizada = origem.replace(/\/+$/, "");
+  if (origensPermitidas.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else if (origensPermitidas.includes(origemNormalizada)) {
+    res.setHeader("Access-Control-Allow-Origin", origem);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+app.use((req, _res, next) => {
+  if (req.url.startsWith("/certificados/downloads/massa")) {
+    req.url = req.url.replace("/certificados/downloads/massa", "/downloads/massa");
+  }
   next();
 });
 
@@ -631,6 +648,7 @@ function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamento
   params.set("vencimento", `gte.${testeInicio}`);
   params.append("order", `${campoEquipamento}.asc`);
   params.append("order", "data.asc");
+  params.append("order", "id.asc");
   return `${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`;
 }
 
