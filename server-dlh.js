@@ -1714,6 +1714,27 @@ app.get("/dlh/certificados", async (req, res) => {
   }
 });
 
+app.get("/dlh/certificados/:id/detalhes", async (req, res) => {
+  try {
+    const id = encodeURIComponent(req.params.id);
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${id}&select=id,pontos_umidade,pontos_temperatura,status,certificado,data,vencimento`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase detalhes do certificado DLH");
+
+    if (!registros.length) {
+      return res.status(404).json({ erro: "Certificado DLH não encontrado" });
+    }
+
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.json(registros[0]);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/dlh/divergentes", async (req, res) => {
   try {
     const limit = Number(req.query.limit || 100);
