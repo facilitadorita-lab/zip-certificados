@@ -2,7 +2,7 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import fetch from "node-fetch";
+import fetchNative from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
@@ -48,6 +48,12 @@ const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
 const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
 const AUTO_SYNC_START_DELAY_MS = Number(process.env.AUTO_SYNC_START_DELAY_MS || 15000);
 const CRITERIOS_CACHE_MS = Number(process.env.CRITERIOS_CACHE_MS || 600000);
+const METRICS_ENABLED = String(process.env.METRICS_ENABLED || "true") === "true";
+const METRICS_TIMEZONE = process.env.METRICS_TIMEZONE || "America/Sao_Paulo";
+const METRICS_START_TIME = process.env.METRICS_START_TIME || "07:30";
+const METRICS_END_TIME = process.env.METRICS_END_TIME || "20:00";
+const METRICS_INTERVAL_MINUTES = Number(process.env.METRICS_INTERVAL_MINUTES || 120);
+const METRICS_RETENTION_DAYS = Number(process.env.METRICS_RETENTION_DAYS || 90);
 const CERTIFICADOS_DLH_LISTA_SELECT = [
   "id", "nome_original", "nome_download", "dlh", "serie", "data",
   "certificado", "status", "validade", "vencimento", "mes_ano_validade",
@@ -59,6 +65,108 @@ let idsBancoCacheDLH = { expiraEm: 0, valor: null };
 let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
 let syncLocalDLHEmExecucao = false;
 let criteriosCacheDLH = { expiraEm: 0, valor: null };
+let metricasFlushEmExecucao = false;
+let ultimoSlotMetricas = "";
+let ultimaLimpezaMetricas = "";
+
+function novasMetricas() {
+  return {
+    periodo_inicio: new Date().toISOString(),
+    requisicoes: 0,
+    respostas_bytes: 0,
+    requisicoes_externas: 0,
+    supabase_requisicoes: 0,
+    supabase_bytes: 0,
+    google_requisicoes: 0,
+    google_bytes: 0,
+    erros: 0,
+    tempo_total_ms: 0,
+    rotas: {}
+  };
+}
+
+let metricas = novasMetricas();
+
+function classificarDestino(url) {
+  const valor = String(url || "");
+  if (SUPABASE_URL && valor.startsWith(SUPABASE_URL)) return "supabase";
+  if (valor.includes("googleapis.com") || valor.includes("google.com")) return "google";
+  return "outro";
+}
+
+async function fetch(url, options) {
+  const response = await fetchNative(url, options);
+  if (!METRICS_ENABLED) return response;
+
+  const destino = classificarDestino(typeof url === "string" ? url : url?.url);
+  const bytes = Number(response.headers.get("content-length") || 0);
+  metricas.requisicoes_externas++;
+
+  if (destino === "supabase") {
+    metricas.supabase_requisicoes++;
+    metricas.supabase_bytes += bytes;
+  } else if (destino === "google") {
+    metricas.google_requisicoes++;
+    metricas.google_bytes += bytes;
+  }
+
+  return response;
+}
+
+function normalizarRotaMetrica(req) {
+  return String(req.route?.path || req.path || "/")
+    .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id")
+    .replace(/\/[A-Za-z0-9_-]{20,}(?=\/|$)/g, "/:id");
+}
+
+app.use((req, res, next) => {
+  if (!METRICS_ENABLED) return next();
+
+  const inicio = Date.now();
+  let bytes = 0;
+  const writeOriginal = res.write.bind(res);
+  const endOriginal = res.end.bind(res);
+  const tamanhoChunk = chunk => {
+    if (typeof chunk === "string" || Buffer.isBuffer(chunk) || ArrayBuffer.isView(chunk)) {
+      return Buffer.byteLength(chunk);
+    }
+    return 0;
+  };
+
+  res.write = (chunk, ...args) => {
+    bytes += tamanhoChunk(chunk);
+    return writeOriginal(chunk, ...args);
+  };
+
+  res.end = (chunk, ...args) => {
+    bytes += tamanhoChunk(chunk);
+    return endOriginal(chunk, ...args);
+  };
+
+  res.on("finish", () => {
+    const rota = `${req.method} ${normalizarRotaMetrica(req)}`;
+    const duracao = Date.now() - inicio;
+    const erro = res.statusCode >= 400 ? 1 : 0;
+    const atual = metricas.rotas[rota] || {
+      requisicoes: 0,
+      respostas_bytes: 0,
+      erros: 0,
+      tempo_total_ms: 0
+    };
+
+    atual.requisicoes++;
+    atual.respostas_bytes += bytes;
+    atual.erros += erro;
+    atual.tempo_total_ms += duracao;
+    metricas.rotas[rota] = atual;
+    metricas.requisicoes++;
+    metricas.respostas_bytes += bytes;
+    metricas.erros += erro;
+    metricas.tempo_total_ms += duracao;
+  });
+
+  next();
+});
 
 
 // =========================
@@ -1171,6 +1279,114 @@ async function buscarCriteriosCalibracao() {
   }
 }
 
+function minutosDoHorario(valor) {
+  const [hora, minuto] = String(valor).split(":").map(Number);
+  return hora * 60 + minuto;
+}
+
+function horarioLocalMetricas() {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: METRICS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+  const dados = Object.fromEntries(partes.map(p => [p.type, p.value]));
+
+  return {
+    data: `${dados.year}-${dados.month}-${dados.day}`,
+    minutos: Number(dados.hour) * 60 + Number(dados.minute)
+  };
+}
+
+function slotAtualMetricas() {
+  const agora = horarioLocalMetricas();
+  const inicio = minutosDoHorario(METRICS_START_TIME);
+  const fim = minutosDoHorario(METRICS_END_TIME);
+  if (agora.minutos < inicio || agora.minutos >= fim) return null;
+
+  const indice = Math.floor((agora.minutos - inicio) / METRICS_INTERVAL_MINUTES);
+  const slotMinutos = inicio + indice * METRICS_INTERVAL_MINUTES;
+  return `${agora.data}-${slotMinutos}`;
+}
+
+async function gravarMetricasConsolidadas() {
+  if (!METRICS_ENABLED || metricasFlushEmExecucao || metricas.requisicoes === 0) return;
+  metricasFlushEmExecucao = true;
+  const snapshot = metricas;
+  metricas = novasMetricas();
+
+  try {
+    const response = await fetchNative(`${SUPABASE_URL}/rest/v1/metricas_consumo`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        servico: "DLH",
+        periodo_inicio: snapshot.periodo_inicio,
+        periodo_fim: new Date().toISOString(),
+        requisicoes: snapshot.requisicoes,
+        respostas_bytes: snapshot.respostas_bytes,
+        requisicoes_externas: snapshot.requisicoes_externas,
+        supabase_requisicoes: snapshot.supabase_requisicoes,
+        supabase_bytes: snapshot.supabase_bytes,
+        google_requisicoes: snapshot.google_requisicoes,
+        google_bytes: snapshot.google_bytes,
+        erros: snapshot.erros,
+        tempo_total_ms: snapshot.tempo_total_ms,
+        rotas: snapshot.rotas
+      })
+    });
+
+    if (!response.ok) throw new Error(await response.text());
+
+    const dataLocal = horarioLocalMetricas().data;
+    if (ultimaLimpezaMetricas !== dataLocal) {
+      ultimaLimpezaMetricas = dataLocal;
+      const limite = new Date(Date.now() - METRICS_RETENTION_DAYS * 86400000).toISOString();
+      await fetchNative(
+        `${SUPABASE_URL}/rest/v1/metricas_consumo?periodo_fim=lt.${encodeURIComponent(limite)}`,
+        { method: "DELETE", headers: supabaseHeaders() }
+      );
+    }
+  } catch (e) {
+    metricas.requisicoes += snapshot.requisicoes;
+    metricas.respostas_bytes += snapshot.respostas_bytes;
+    metricas.requisicoes_externas += snapshot.requisicoes_externas;
+    metricas.supabase_requisicoes += snapshot.supabase_requisicoes;
+    metricas.supabase_bytes += snapshot.supabase_bytes;
+    metricas.google_requisicoes += snapshot.google_requisicoes;
+    metricas.google_bytes += snapshot.google_bytes;
+    metricas.erros += snapshot.erros;
+    metricas.tempo_total_ms += snapshot.tempo_total_ms;
+    for (const [rota, valores] of Object.entries(snapshot.rotas)) {
+      const atual = metricas.rotas[rota] || {
+        requisicoes: 0, respostas_bytes: 0, erros: 0, tempo_total_ms: 0
+      };
+      for (const campo of Object.keys(atual)) atual[campo] += valores[campo] || 0;
+      metricas.rotas[rota] = atual;
+    }
+    console.log("Falha ao consolidar métricas DLH:", e.message);
+  } finally {
+    metricasFlushEmExecucao = false;
+  }
+}
+
+async function verificarAgendaMetricas() {
+  const slot = slotAtualMetricas();
+  if (!slot) return;
+  if (!ultimoSlotMetricas) {
+    ultimoSlotMetricas = slot;
+    return;
+  }
+  if (slot === ultimoSlotMetricas) return;
+
+  ultimoSlotMetricas = slot;
+  await gravarMetricasConsolidadas();
+}
+
 function avaliarStatusDLH(pontosUmidade = [], pontosTemperatura = [], criterios = {}) {
   const limiteTemperatura = Number(criterios.limite_temperatura ?? 0.5);
   const limiteUmidade = Number(criterios.limite_umidade ?? 5.0);
@@ -1632,6 +1848,35 @@ app.get("/dlh/criterios/historico", async (req, res) => {
     const registros = validarListaSupabase(response, data, "Supabase histórico DMA DLH");
     res.setHeader("Cache-Control", "private, max-age=300");
     res.json({ total: registros.length, registros });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/metricas/atual", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    servico: "DLH",
+    consolidado: false,
+    ...metricas
+  });
+});
+
+app.get("/dlh/metricas", async (req, res) => {
+  try {
+    const dias = Math.min(
+      METRICS_RETENTION_DAYS,
+      Math.max(1, Number(req.query.dias || 30))
+    );
+    const desde = new Date(Date.now() - dias * 86400000).toISOString();
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/metricas_consumo?servico=eq.DLH&periodo_fim=gte.${encodeURIComponent(desde)}&select=id,servico,periodo_inicio,periodo_fim,requisicoes,respostas_bytes,requisicoes_externas,supabase_requisicoes,supabase_bytes,google_requisicoes,google_bytes,erros,tempo_total_ms,rotas&order=periodo_fim.desc&limit=500`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase métricas DLH");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ estimativa: true, dias, total: registros.length, registros });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -2636,5 +2881,14 @@ app.listen(PORT, () => {
     setTimeout(() => {
       executarSyncAutomaticoDLH();
     }, AUTO_SYNC_START_DELAY_MS);
+  }
+
+  if (METRICS_ENABLED) {
+    verificarAgendaMetricas();
+    setInterval(() => {
+      verificarAgendaMetricas().catch(e => {
+        console.log("Erro na agenda de métricas DLH:", e.message);
+      });
+    }, 60000);
   }
 });
