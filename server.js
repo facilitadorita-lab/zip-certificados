@@ -44,6 +44,7 @@ const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
 const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
 const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
 const AUTO_SYNC_START_DELAY_MS = Number(process.env.AUTO_SYNC_START_DELAY_MS || 15000);
+const CRITERIOS_CACHE_MS = Number(process.env.CRITERIOS_CACHE_MS || 600000);
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -67,6 +68,7 @@ let statusCache = { expiraEm: 0, valor: null };
 let idsBancoCache = { expiraEm: 0, valor: null };
 let idsExcluidosCache = { expiraEm: 0, valor: null };
 let syncLocalEmExecucao = false;
+let criteriosCache = { expiraEm: 0, valor: null };
 
 // =========================
 // GOOGLE DRIVE AUTH
@@ -150,6 +152,26 @@ async function contarTabela(tabela) {
 
   const total = response.headers.get("content-range")?.split("/")[1];
   return Number(total || 0);
+}
+
+async function buscarCriteriosCalibracao() {
+  if (criteriosCache.valor && criteriosCache.expiraEm > Date.now()) {
+    return criteriosCache.valor;
+  }
+
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/criterios_calibracao?id=eq.1&select=id,limite_dlt,atualizado_em`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, "Supabase critérios DLT");
+  const criterios = {
+    limite_dlt: Number(registros[0]?.limite_dlt ?? 0.5),
+    atualizado_em: registros[0]?.atualizado_em || null
+  };
+
+  criteriosCache = { valor: criterios, expiraEm: Date.now() + CRITERIOS_CACHE_MS };
+  return criterios;
 }
 
 function parseBR(v) {
@@ -703,7 +725,7 @@ function montarLogoHtml() {
   `;
 }
 
-function montarHtmlRelatorioDia(registros, dataRelatorio) {
+function montarHtmlRelatorioDia(registros, dataRelatorio, dma = 0.5) {
   const grupos = agruparRegistrosPorDLT(registros);
 
   const total = registros.length;
@@ -949,7 +971,7 @@ function montarHtmlRelatorioDia(registros, dataRelatorio) {
           <div class="meta-grid">
             <div><strong>Instrumento:</strong> TESTO</div>
             <div><strong>Modelo:</strong> 174T</div>
-            <div><strong>DMA:</strong> 0,5</div>
+            <div><strong>DMA:</strong> ${escaparHtml(String(dma).replace(".", ","))}</div>
             <div><strong>Unidade:</strong> °C</div>
           </div>
         </div>
@@ -1220,12 +1242,14 @@ async function processarPDF(fileId) {
       };
     }
 
-    const aprovado = tabela.pontos.every(p => p.soma <= 0.5);
+    const criterios = await buscarCriteriosCalibracao();
+    const aprovado = tabela.pontos.every(p => p.soma <= criterios.limite_dlt);
 
     return {
       status: aprovado ? "APROVADO" : "REPROVADO",
       pontos: tabela.pontos,
-      certificado: meta.certificado || ""
+      certificado: meta.certificado || "",
+      criterios_aceitacao: criterios
     };
   } catch (e) {
     return {
@@ -1391,6 +1415,7 @@ async function executarSyncEmBackground() {
     const idsBanco = await buscarIdsBanco();
     const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
+    const criterios = await buscarCriteriosCalibracao();
 
     await atualizarControleSync({
       em_execucao: true,
@@ -1422,7 +1447,9 @@ async function executarSyncEmBackground() {
           continue;
         }
 
-        const status = tabela.pontos.every(p => p.soma <= 0.5) ? "APROVADO" : "REPROVADO";
+        const status = tabela.pontos.every(p => p.soma <= criterios.limite_dlt)
+          ? "APROVADO"
+          : "REPROVADO";
         const val = verificarValidade(meta.data);
         const divergencia = avaliarDivergencia(meta.dlt, meta.serie);
         const nomePadronizado = montarNomePadrao(meta.dlt, meta.serie, meta.data);
@@ -1509,6 +1536,91 @@ async function executarSyncEmBackground() {
 // =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
+});
+
+app.get("/criterios", async (req, res) => {
+  try {
+    const criterios = await buscarCriteriosCalibracao();
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json(criterios);
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.patch("/criterios", async (req, res) => {
+  try {
+    const limiteDlt = Number(req.body?.limite_dlt);
+    const alteradoPor = String(req.body?.alterado_por || "").trim() || null;
+
+    if (!Number.isFinite(limiteDlt) || limiteDlt <= 0 || limiteDlt > 100) {
+      return res.status(400).json({ erro: "limite_dlt deve ser maior que zero e menor ou igual a 100." });
+    }
+
+    const anterior = await buscarCriteriosCalibracao();
+    const atualizadoEm = new Date().toISOString();
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao?on_conflict=id`,
+      {
+        method: "POST",
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "resolution=merge-duplicates,return=representation"
+        },
+        body: JSON.stringify({
+          id: 1,
+          limite_dlt: limiteDlt,
+          atualizado_em: atualizadoEm
+        })
+      }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase atualização do DMA DLT");
+
+    const historico = await fetch(`${SUPABASE_URL}/rest/v1/criterios_calibracao_historico`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        modulo: "DLT",
+        limite_dlt_anterior: anterior.limite_dlt,
+        limite_dlt_novo: limiteDlt,
+        alterado_por: alteradoPor,
+        alterado_em: atualizadoEm
+      })
+    });
+    if (!historico.ok) {
+      throw new Error(`DMA atualizado, mas houve falha ao gravar histórico: ${await historico.text()}`);
+    }
+
+    criteriosCache = {
+      valor: { limite_dlt: limiteDlt, atualizado_em: atualizadoEm },
+      expiraEm: Date.now() + CRITERIOS_CACHE_MS
+    };
+
+    res.json({
+      sucesso: true,
+      criterios: registros[0],
+      reprocessamento_automatico: false
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/criterios/historico", async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/criterios_calibracao_historico?modulo=eq.DLT&select=id,limite_dlt_anterior,limite_dlt_novo,alterado_por,alterado_em&order=alterado_em.desc&limit=${limit}`,
+      { headers: supabaseHeaders() }
+    );
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase histórico DMA DLT");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({ total: registros.length, registros });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.get("/status", async (req, res) => {
@@ -2115,7 +2227,8 @@ app.get("/relatorio-dia/html", async (req, res) => {
       mesmaData(item.criado_em, dataRelatorio)
     );
 
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio);
+    const criterios = await buscarCriteriosCalibracao();
+    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
   } catch (e) {
@@ -2140,7 +2253,8 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
       mesmaData(item.criado_em, dataRelatorio)
     );
 
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio);
+    const criterios = await buscarCriteriosCalibracao();
+    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
     const nomeArquivo = `RELATORIO_DIARIO_174T_${dataRelatorio}.pdf`;
 
     browser = await chromium.launch({ headless: true });
@@ -2313,7 +2427,8 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
     sheet.getCell("A5").value = "Marca: TESTO";
     sheet.getCell("B5").value = "Modelo: 174T";
     sheet.getCell("C5").value = "Resolução: 0,1";
-    sheet.getCell("D5").value = "DMA: 0,5";
+    const criterios = await buscarCriteriosCalibracao();
+    sheet.getCell("D5").value = `DMA: ${String(criterios.limite_dlt).replace(".", ",")}`;
     sheet.getCell("E5").value = "Unidade: °C";
 
     // =========================
