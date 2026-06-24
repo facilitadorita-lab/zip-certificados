@@ -411,6 +411,93 @@ function soDigitos(texto) {
 // FILTROS POR PERIODO / DOWNLOAD EM MASSA
 // =========================
 const downloadJobsDLH = new Map();
+const DOWNLOAD_JOB_PROGRESS_STEP = Number(process.env.DOWNLOAD_JOB_PROGRESS_STEP || 25);
+
+function serializarDownloadJobDLH(job) {
+  return {
+    id: job.id,
+    modulo: job.tipo || "DLH",
+    status: job.status,
+    total: Number(job.total || 0),
+    processados: Number(job.processados || 0),
+    falhas: Number(job.falhas || 0),
+    erros: Array.isArray(job.erros) ? job.erros.slice(-50) : [],
+    erro: job.erro || null,
+    aviso_drive: job.aviso_drive || null,
+    arquivo_zip_nome: job.arquivo_zip_nome || null,
+    arquivo_zip_drive_id: job.arquivo_zip_drive_id || null,
+    arquivo_zip_link: job.arquivo_zip_link || null,
+    solicitado_por: job.solicitado_por || null,
+    solicitado_email: job.solicitado_email || null,
+    parametros: job.parametros || {},
+    criado_em: job.criado_em,
+    atualizado_em: job.atualizado_em || new Date().toISOString(),
+    expira_em: job.expira_em || null
+  };
+}
+
+function hidratarDownloadJobDLH(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    tipo: row.modulo || "DLH",
+    status: row.status,
+    total: Number(row.total || 0),
+    processados: Number(row.processados || 0),
+    falhas: Number(row.falhas || 0),
+    erros: Array.isArray(row.erros) ? row.erros : [],
+    erro: row.erro || null,
+    aviso_drive: row.aviso_drive || null,
+    arquivo_zip_nome: row.arquivo_zip_nome || null,
+    arquivo_zip_drive_id: row.arquivo_zip_drive_id || null,
+    arquivo_zip_link: row.arquivo_zip_link || null,
+    solicitado_por: row.solicitado_por || null,
+    solicitado_email: row.solicitado_email || null,
+    parametros: row.parametros || {},
+    criado_em: row.criado_em,
+    atualizado_em: row.atualizado_em,
+    expira_em: row.expira_em
+  };
+}
+
+async function salvarDownloadJobDLH(job) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !job?.id) return;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/download_jobs?on_conflict=id`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(serializarDownloadJobDLH(job))
+    });
+    if (!response.ok) {
+      const detalhe = await response.text().catch(() => "");
+      console.warn("Falha ao salvar download_jobs:", detalhe || response.status);
+    }
+  } catch (e) {
+    console.warn("Falha ao salvar download_jobs:", e.message);
+  }
+}
+
+async function buscarDownloadJobPersistidoDLH(jobId, modulo = "DLH") {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !jobId) return null;
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/download_jobs?id=eq.${encodeURIComponent(jobId)}&modulo=eq.${modulo}&select=*`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json().catch(() => []);
+  if (!response.ok || !Array.isArray(data)) return null;
+  return hidratarDownloadJobDLH(data[0]);
+}
+
+async function listarDownloadJobsPersistidosDLH(modulo = "DLH", limit = 50) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}&select=*&order=criado_em.desc&limit=${limit}`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json().catch(() => []);
+  if (!response.ok || !Array.isArray(data)) return [];
+  return data.map(hidratarDownloadJobDLH);
+}
 
 function limparNomeArquivo(nome) {
   return String(nome || "certificado.pdf")
@@ -678,6 +765,13 @@ async function salvarZipNoDriveDLH(zipPath, nomeArquivo) {
   return response.data;
 }
 
+function agendarRemocaoArquivoTemporarioDLH(caminho, minutos = 60) {
+  const timer = setTimeout(() => {
+    fs.promises.rm(caminho, { force: true }).catch(() => {});
+  }, minutos * 60 * 1000);
+  if (typeof timer.unref === "function") timer.unref();
+}
+
 async function criarZipNoDiscoDLH(registros, zipPath, job) {
   const pastaTemporaria = await fs.promises.mkdtemp(path.join(os.tmpdir(), "certificados-dlh-"));
   const arquivos = [];
@@ -703,6 +797,9 @@ async function criarZipNoDiscoDLH(registros, zipPath, job) {
         });
       }
       job.atualizado_em = new Date().toISOString();
+      if ((index + 1) % DOWNLOAD_JOB_PROGRESS_STEP === 0 || index === registros.length - 1) {
+        await salvarDownloadJobDLH(job);
+      }
     }
 
     if (!arquivos.length) {
@@ -732,20 +829,30 @@ async function processarDownloadMassaDLH(jobId, registros) {
   job.status = "processando";
   job.total = registros.length;
   job.atualizado_em = new Date().toISOString();
+  await salvarDownloadJobDLH(job);
 
   const nomeArquivo = `CERTIFICADOS_DLH_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
   const zipPath = path.join(os.tmpdir(), nomeArquivo);
   try {
     await criarZipNoDiscoDLH(registros, zipPath, job);
-    const arquivoDrive = await salvarZipNoDriveDLH(zipPath, nomeArquivo);
+    let arquivoDrive = {};
+    try {
+      arquivoDrive = await salvarZipNoDriveDLH(zipPath, nomeArquivo);
+    } catch (e) {
+      job.aviso_drive = `ZIP criado localmente, mas nao foi salvo no Drive: ${e.message}`;
+    }
 
     job.status = "concluido";
     job.arquivo_zip_nome = nomeArquivo;
+    job.arquivo_zip_local_path = zipPath;
     job.arquivo_zip_drive_id = arquivoDrive.id || null;
     job.arquivo_zip_link = arquivoDrive.webViewLink || arquivoDrive.webContentLink || null;
     job.atualizado_em = new Date().toISOString();
-  } finally {
-    await fs.promises.rm(zipPath, { force: true });
+    await salvarDownloadJobDLH(job);
+    agendarRemocaoArquivoTemporarioDLH(zipPath, 60);
+  } catch (e) {
+    await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+    throw e;
   }
 }
 
@@ -2452,7 +2559,8 @@ app.post("/dlh/downloads/massa", async (req, res) => {
     }
 
     const jobId = crypto.randomUUID();
-    downloadJobsDLH.set(jobId, {
+    const agoraJob = new Date();
+    const job = {
       id: jobId,
       tipo: "DLH",
       status: "pendente",
@@ -2463,9 +2571,21 @@ app.post("/dlh/downloads/massa", async (req, res) => {
       arquivo_zip_nome: null,
       arquivo_zip_drive_id: null,
       arquivo_zip_link: null,
-      criado_em: new Date().toISOString(),
-      atualizado_em: new Date().toISOString()
-    });
+      solicitado_por: req.auth?.user?.id || null,
+      solicitado_email: req.auth?.user?.email || req.auth?.perfil?.email || null,
+      parametros: {
+        modo: ids.length ? "ids" : "periodo",
+        total_ids: ids.length,
+        total_equipamentos: listaEquipamentos.length,
+        teste_inicio: testeInicio || null,
+        teste_fim: testeFim || null
+      },
+      criado_em: agoraJob.toISOString(),
+      atualizado_em: agoraJob.toISOString(),
+      expira_em: new Date(agoraJob.getTime() + 24 * 60 * 60 * 1000).toISOString()
+    };
+    downloadJobsDLH.set(jobId, job);
+    await salvarDownloadJobDLH(job);
 
     setTimeout(() => {
       processarDownloadMassaDLH(jobId, Array.isArray(registros) ? registros : []).catch(e => {
@@ -2474,6 +2594,7 @@ app.post("/dlh/downloads/massa", async (req, res) => {
           job.status = "erro";
           job.erro = e.message;
           job.atualizado_em = new Date().toISOString();
+          salvarDownloadJobDLH(job).catch(() => {});
         }
       });
     }, 0);
@@ -2484,18 +2605,37 @@ app.post("/dlh/downloads/massa", async (req, res) => {
   }
 });
 
-app.get("/dlh/downloads/massa/:jobId", (req, res) => {
-  const job = downloadJobsDLH.get(req.params.jobId);
+app.get("/dlh/downloads/massa/historico", async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+    const jobs = await listarDownloadJobsPersistidosDLH("DLH", limit);
+    res.json({ jobs });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/downloads/massa/:jobId", async (req, res) => {
+  const job = downloadJobsDLH.get(req.params.jobId) || await buscarDownloadJobPersistidoDLH(req.params.jobId, "DLH");
   if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
   res.json(job);
 });
 
 app.get("/dlh/downloads/massa/:jobId/arquivo", async (req, res) => {
   try {
-    const job = downloadJobsDLH.get(req.params.jobId);
+    const job = downloadJobsDLH.get(req.params.jobId) || await buscarDownloadJobPersistidoDLH(req.params.jobId, "DLH");
     if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
-    if (job.status !== "concluido" || !job.arquivo_zip_drive_id) {
+    const temArquivoLocal = job.arquivo_zip_local_path && fs.existsSync(job.arquivo_zip_local_path);
+    if (job.status !== "concluido" || (!temArquivoLocal && !job.arquivo_zip_drive_id)) {
       return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
+    }
+    if (temArquivoLocal) {
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${job.arquivo_zip_nome || "certificados-dlh.zip"}"`
+      );
+      return fs.createReadStream(job.arquivo_zip_local_path).pipe(res);
     }
     if (!drive) {
       return res.status(503).json({ erro: "Google Drive não configurado" });
