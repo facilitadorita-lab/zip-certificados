@@ -1710,11 +1710,27 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
       tabela.pontos_temperatura,
       criterios
     );
+    const pontosUmidadeComResultado = (tabela.pontos_umidade || []).map(p => {
+      const aprovadoPonto = Number(p.soma) <= avaliacao.limite_umidade;
+      return {
+        ...p,
+        limite: avaliacao.limite_umidade,
+        resultado: aprovadoPonto ? "APROVADO" : "REPROVADO"
+      };
+    });
+    const pontosTemperaturaComResultado = (tabela.pontos_temperatura || []).map(p => {
+      const aprovadoPonto = Number(p.soma) <= avaliacao.limite_temperatura;
+      return {
+        ...p,
+        limite: avaliacao.limite_temperatura,
+        resultado: aprovadoPonto ? "APROVADO" : "REPROVADO"
+      };
+    });
 
     return {
       status: avaliacao.aprovado ? "APROVADO" : "REPROVADO",
-      pontos_umidade: tabela.pontos_umidade,
-      pontos_temperatura: tabela.pontos_temperatura,
+      pontos_umidade: pontosUmidadeComResultado,
+      pontos_temperatura: pontosTemperaturaComResultado,
       certificado: meta.certificado || "",
       criterios_aceitacao: {
         limite_temperatura: avaliacao.limite_temperatura,
