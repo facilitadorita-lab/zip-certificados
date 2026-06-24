@@ -1726,11 +1726,20 @@ async function processarPDF(fileId) {
     }
 
     const criterios = await buscarCriteriosCalibracao();
-    const aprovado = tabela.pontos.every(p => p.soma <= criterios.limite_dlt);
+    const limiteDlt = Number(criterios.limite_dlt ?? 0.5);
+    const pontosComResultado = tabela.pontos.map(p => {
+      const aprovadoPonto = Number(p.soma) <= limiteDlt;
+      return {
+        ...p,
+        limite: limiteDlt,
+        resultado: aprovadoPonto ? "APROVADO" : "REPROVADO"
+      };
+    });
+    const aprovado = pontosComResultado.every(p => p.resultado === "APROVADO");
 
     return {
       status: aprovado ? "APROVADO" : "REPROVADO",
-      pontos: tabela.pontos,
+      pontos: pontosComResultado,
       certificado: meta.certificado || "",
       criterios_aceitacao: criterios
     };
