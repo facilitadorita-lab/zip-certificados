@@ -331,6 +331,7 @@ function identificarAcaoAuditoria(metodo, rota) {
   if (metodo === "PATCH" && rota.startsWith("/usuarios/")) return ["ALTERAR_USUARIO", "Cadastro de usuário alterado"];
   if (metodo === "DELETE" && rota.startsWith("/certificados/")) return ["EXCLUIR_CERTIFICADO", "Certificado DLT excluído"];
   if (metodo === "POST" && rota === "/downloads/massa") return ["DOWNLOAD_MASSA", "Download em massa DLT solicitado"];
+  if (metodo === "POST" && rota.startsWith("/downloads/massa/") && rota.endsWith("/link")) return ["BAIXAR_ZIP", "Link temporário do ZIP DLT gerado"];
   if (metodo === "GET" && rota.startsWith("/downloads/massa/") && rota.endsWith("/arquivo")) return ["BAIXAR_ZIP", "Arquivo ZIP DLT baixado"];
   if (metodo === "GET" && rota.startsWith("/download/")) return ["DOWNLOAD_CERTIFICADO", "Certificado DLT baixado"];
   if (metodo === "GET" && rota === "/relatorio-dia") return ["GERAR_RELATORIO", "Relatório diário DLT gerado"];
@@ -371,11 +372,16 @@ async function registrarAuditoria(req, statusCode, acao, descricao) {
 }
 
 app.use(async (req, res, next) => {
+  const possuiTicketDownload =
+    req.method === "GET" &&
+    /^\/downloads\/massa\/[^/]+\/arquivo$/.test(req.path) &&
+    Boolean(req.query?.ticket);
   if (
     !AUTH_ENABLED ||
     req.method === "OPTIONS" ||
     req.path === "/" ||
-    req.path.startsWith("/automacao/")
+    req.path.startsWith("/automacao/") ||
+    possuiTicketDownload
   ) {
     return next();
   }
@@ -690,7 +696,25 @@ function escaparHtml(valor) {
 // FILTROS POR PERIODO / DOWNLOAD EM MASSA
 // =========================
 const downloadJobs = new Map();
+const downloadTickets = new Map();
 const DOWNLOAD_JOB_PROGRESS_STEP = Number(process.env.DOWNLOAD_JOB_PROGRESS_STEP || 25);
+const DOWNLOAD_TICKET_TTL_MS = Number(process.env.DOWNLOAD_TICKET_TTL_MS || 300000);
+
+function criarDownloadTicket(jobId) {
+  const ticket = crypto.randomBytes(32).toString("hex");
+  const expiraEm = Date.now() + DOWNLOAD_TICKET_TTL_MS;
+  downloadTickets.set(ticket, { jobId, expiraEm });
+  return { ticket, expiraEm };
+}
+
+function validarDownloadTicket(jobId, ticket) {
+  const agora = Date.now();
+  for (const [chave, valor] of downloadTickets) {
+    if (valor.expiraEm <= agora) downloadTickets.delete(chave);
+  }
+  const registro = downloadTickets.get(String(ticket || ""));
+  return Boolean(registro && registro.jobId === jobId && registro.expiraEm > agora);
+}
 
 function serializarDownloadJob(job) {
   return {
@@ -2939,11 +2963,30 @@ app.get("/downloads/massa/:jobId", async (req, res) => {
   res.json(job);
 });
 
+app.post("/downloads/massa/:jobId/link", async (req, res) => {
+  const job = downloadJobs.get(req.params.jobId) || await buscarDownloadJobPersistido(req.params.jobId, "DLT");
+  if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+  if (!podeAcessarDownloadJob(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
+  const temArquivoLocal = job.arquivo_zip_local_path && fs.existsSync(job.arquivo_zip_local_path);
+  if (job.status !== "concluido" || (!temArquivoLocal && !job.arquivo_zip_drive_id)) {
+    return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
+  }
+  const { ticket, expiraEm } = criarDownloadTicket(job.id);
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    download_url: `/downloads/massa/${encodeURIComponent(job.id)}/arquivo?ticket=${ticket}`,
+    expira_em: new Date(expiraEm).toISOString()
+  });
+});
+
 app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
   try {
     const job = downloadJobs.get(req.params.jobId) || await buscarDownloadJobPersistido(req.params.jobId, "DLT");
     if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
-    if (!podeAcessarDownloadJob(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
+    const ticketValido = validarDownloadTicket(job.id, req.query?.ticket);
+    if (!ticketValido && !podeAcessarDownloadJob(req, job)) {
+      return res.status(403).json({ erro: "Link de download inválido ou expirado" });
+    }
     const temArquivoLocal = job.arquivo_zip_local_path && fs.existsSync(job.arquivo_zip_local_path);
     if (job.status !== "concluido" || (!temArquivoLocal && !job.arquivo_zip_drive_id)) {
       return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
