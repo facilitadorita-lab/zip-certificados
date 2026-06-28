@@ -251,7 +251,7 @@ async function buscarPerfilUsuario(user) {
   if (cache?.expiraEm > Date.now()) return cache.valor;
 
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo`,
+    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json();
@@ -274,6 +274,8 @@ async function autenticarToken(token) {
 
   const perfil = await buscarPerfilUsuario(data.user);
   if (!perfil.ativo) throw new Error("Usuário desativado");
+
+  if (!perfil.aprovado) throw new Error("Usuario aguardando aprovacao");
 
   const auth = { user: data.user, perfil };
   authCache.set(token, { valor: auth, expiraEm: Date.now() + AUTH_CACHE_MS });
@@ -488,15 +490,24 @@ async function buscarDownloadJobPersistidoDLH(jobId, modulo = "DLH") {
   return hidratarDownloadJobDLH(data[0]);
 }
 
-async function listarDownloadJobsPersistidosDLH(modulo = "DLH", limit = 50) {
+async function listarDownloadJobsPersistidosDLH(modulo = "DLH", limit = 50, solicitadoPor = null) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  const filtroUsuario = solicitadoPor
+    ? `&solicitado_por=eq.${encodeURIComponent(solicitadoPor)}`
+    : "";
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}&select=*&order=criado_em.desc&limit=${limit}`,
+    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}${filtroUsuario}&select=*&order=criado_em.desc&limit=${limit}`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json().catch(() => []);
   if (!response.ok || !Array.isArray(data)) return [];
   return data.map(hidratarDownloadJobDLH);
+}
+
+function podeAcessarDownloadJobDLH(req, job) {
+  const role = req.auth?.perfil?.role;
+  if (role === "dev" || role === "administrador") return true;
+  return Boolean(job?.solicitado_por) && job.solicitado_por === req.auth?.user?.id;
 }
 
 function limparNomeArquivo(nome) {
@@ -2624,7 +2635,11 @@ app.post("/dlh/downloads/massa", async (req, res) => {
 app.get("/dlh/downloads/massa/historico", async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
-    const jobs = await listarDownloadJobsPersistidosDLH("DLH", limit);
+    const role = req.auth?.perfil?.role;
+    const solicitadoPor = role === "dev" || role === "administrador"
+      ? null
+      : req.auth?.user?.id;
+    const jobs = await listarDownloadJobsPersistidosDLH("DLH", limit, solicitadoPor);
     res.json({ jobs });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -2634,6 +2649,7 @@ app.get("/dlh/downloads/massa/historico", async (req, res) => {
 app.get("/dlh/downloads/massa/:jobId", async (req, res) => {
   const job = downloadJobsDLH.get(req.params.jobId) || await buscarDownloadJobPersistidoDLH(req.params.jobId, "DLH");
   if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+  if (!podeAcessarDownloadJobDLH(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
   res.json(job);
 });
 
@@ -2641,6 +2657,7 @@ app.get("/dlh/downloads/massa/:jobId/arquivo", async (req, res) => {
   try {
     const job = downloadJobsDLH.get(req.params.jobId) || await buscarDownloadJobPersistidoDLH(req.params.jobId, "DLH");
     if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+    if (!podeAcessarDownloadJobDLH(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
     const temArquivoLocal = job.arquivo_zip_local_path && fs.existsSync(job.arquivo_zip_local_path);
     if (job.status !== "concluido" || (!temArquivoLocal && !job.arquivo_zip_drive_id)) {
       return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
