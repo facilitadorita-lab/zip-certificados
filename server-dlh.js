@@ -60,7 +60,7 @@ app.use((req, _res, next) => {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const MODELO_RELATORIO_PATH = path.join(__dirname, "modelo-relatorio.xlsx");
+const MODELO_RELATORIO_PATH = path.join(__dirname, "modelo-relatorio-dlh.xlsx");
 
 
 // =========================
@@ -2997,7 +2997,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
 
     if (!fs.existsSync(MODELO_RELATORIO_PATH)) {
       throw new Error(
-        "Arquivo modelo-relatorio.xlsx não encontrado na raiz do projeto. Adicione a planilha modelo no repositório com este nome."
+        "Arquivo modelo-relatorio-dlh.xlsx não encontrado na raiz do projeto."
       );
     }
 
@@ -3005,7 +3005,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     await workbook.xlsx.readFile(MODELO_RELATORIO_PATH);
 
     workbook.creator = "ITA FRIA";
-    workbook.lastModifiedBy = "Sistema de Certificados DLH";
+    workbook.lastModifiedBy = "CalibraFlow";
     workbook.created = new Date();
     workbook.modified = new Date();
 
@@ -3015,7 +3015,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
       throw new Error("A planilha modelo não possui nenhuma aba.");
     }
 
-    sheet.name = "Relatório DLH";
+    sheet.name = "Relatorio DLH";
 
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
@@ -3031,6 +3031,12 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     const criteriosRelatorio = await buscarCriteriosCalibracao();
     const limiteTemperaturaRelatorio = Number(criteriosRelatorio.limite_temperatura ?? 0.5);
     const limiteUmidadeRelatorio = Number(criteriosRelatorio.limite_umidade ?? 5.0);
+
+    sheet.getCell("A1").value = "REL 06GQ10";
+    sheet.getCell("A2").value = `Versao: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+    sheet.getCell("D1").value = "AVALIACAO DOS CERTIFICADOS DE CALIBRACAO - TESTO 174H";
+    sheet.getCell("I5").value = `DMA temperatura: ${String(limiteTemperaturaRelatorio).replace(".", ",")} °C`;
+    sheet.getCell("S5").value = `DMA umidade: ${String(limiteUmidadeRelatorio).replace(".", ",")} %UR`;
 
     // =========================
     // CONFIGURAÇÃO DE IMPRESSÃO
@@ -3190,14 +3196,12 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
       const a1 = valorTexto(sheet.getCell("A1")).toUpperCase();
 
       if (!a1 || a1.includes("REL")) {
-        sheet.getCell("A1").value =
-`REL 06GQ09
-Versão: 01
-Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+        sheet.getCell("A1").value = "REL 06GQ10";
+        sheet.getCell("A2").value = `Versao: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
         sheet.getCell("A1").alignment = {
           horizontal: "left",
           vertical: "middle",
-          wrapText: true
+          wrapText: false
         };
         sheet.getCell("A1").font = {
           name: "Arial",
@@ -3298,8 +3302,10 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       footerStartRow += quantidadeInserir;
     }
 
-    const baseStyle = clonar(sheet.getRow(dataStartRow).getCell(1).style);
-    const colCount = 27;
+    const colCount = 26;
+    const estilosBase = Array.from({ length: colCount }, (_, index) =>
+      clonar(sheet.getRow(dataStartRow).getCell(index + 1).style)
+    );
 
     // Limpa somente a área de dados, preservando o cabeçalho e o rodapé/assinaturas do modelo.
     for (let rowNumber = dataStartRow; rowNumber < footerStartRow; rowNumber++) {
@@ -3309,8 +3315,50 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       for (let col = 1; col <= colCount; col++) {
         const cell = row.getCell(col);
         cell.value = "";
-        aplicarPadraoCelula(cell, baseStyle);
+        aplicarPadraoCelula(cell, estilosBase[col - 1]);
       }
+    }
+
+    function buscarPonto(pontos, alvo, fallbackIndex) {
+      const candidatos = (Array.isArray(pontos) ? pontos : [])
+        .map((ponto, index) => ({
+          ponto,
+          index,
+          referencia: Number(ponto?.padrao ?? ponto?.referencia)
+        }))
+        .filter(item => Number.isFinite(item.referencia))
+        .sort((a, b) => Math.abs(a.referencia - alvo) - Math.abs(b.referencia - alvo));
+
+      if (candidatos[0] && Math.abs(candidatos[0].referencia - alvo) <= 3) {
+        return candidatos[0].ponto;
+      }
+
+      return (Array.isArray(pontos) ? pontos : [])[fallbackIndex] || {};
+    }
+
+    function resultadoPonto(ponto) {
+      const soma = numeroOuVazio(ponto?.soma);
+      if (soma !== "") return soma;
+
+      const erro = numeroOuVazio(ponto?.erro);
+      const incerteza = numeroOuVazio(ponto?.incerteza);
+      if (erro === "" || incerteza === "") return "";
+
+      return Number((Math.abs(erro) + Math.abs(incerteza)).toFixed(2));
+    }
+
+    function resultadoGrupo(pontos, limite, quantidadeEsperada) {
+      const resultados = pontos.map(resultadoPonto).filter(valor => valor !== "");
+      if (resultados.length < quantidadeEsperada) return "INDETERMINADO";
+      return resultados.every(valor => Number(valor) <= Number(limite))
+        ? "APROVADO"
+        : "REPROVADO";
+    }
+
+    function dataExcel(valor) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(valor || ""))) return "";
+      const [ano, mes, dia] = String(valor).split("-").map(Number);
+      return new Date(ano, mes - 1, dia, 12, 0, 0);
     }
 
     dados.forEach((c, index) => {
@@ -3320,75 +3368,89 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
       const u = Array.isArray(c.pontos_umidade) ? c.pontos_umidade : [];
       const t = Array.isArray(c.pontos_temperatura) ? c.pontos_temperatura : [];
 
-      const u1 = u[0] || {};
-      const u2 = u[1] || {};
-      const u3 = u[2] || {};
-
-      const t1 = t[0] || {};
-      const t2 = t[1] || {};
-      const t3 = t[2] || {};
-      const t4 = t[3] || {};
+      const u10 = buscarPonto(u, 10, 0);
+      const u50 = buscarPonto(u, 50, 1);
+      const u90 = buscarPonto(u, 90, 2);
+      const tMenos20 = buscarPonto(t, -20, 0);
+      const tZero = buscarPonto(t, 0, 1);
+      const tQuinze = buscarPonto(t, 15, 2);
+      const tSessenta = buscarPonto(t, 60, 3);
+      const incertezaTemperatura = t
+        .map(ponto => numeroOuVazio(ponto?.incerteza))
+        .find(valor => valor !== "") ?? "";
+      const resultadoTemperatura = resultadoGrupo(t, limiteTemperaturaRelatorio, 4);
+      const resultadoUmidade = resultadoGrupo(u, limiteUmidadeRelatorio, 3);
+      const resultadoGeral = resultadoTemperatura === "REPROVADO" || resultadoUmidade === "REPROVADO"
+        ? "REPROVADO"
+        : resultadoTemperatura === "APROVADO" && resultadoUmidade === "APROVADO"
+          ? "APROVADO"
+          : String(c.status || "INDETERMINADO").toUpperCase();
 
       row.values = [
         "",
         c.serie || "",
         normalizarDLH(c.dlh) || c.dlh || "",
-        formatarDataISOParaBR(c.data),
+        dataExcel(c.data),
         c.mes_ano_validade || "",
         c.certificado || "",
-
-        numeroOuVazio(u1.erro),
-        numeroOuVazio(u1.incerteza),
-        numeroOuVazio(u1.soma),
-
-        numeroOuVazio(u2.erro),
-        numeroOuVazio(u2.incerteza),
-        numeroOuVazio(u2.soma),
-
-        numeroOuVazio(u3.erro),
-        numeroOuVazio(u3.incerteza),
-        numeroOuVazio(u3.soma),
-
-        numeroOuVazio(t1.erro),
-        numeroOuVazio(t1.incerteza),
-        numeroOuVazio(t1.soma),
-
-        numeroOuVazio(t2.erro),
-        numeroOuVazio(t2.incerteza),
-        numeroOuVazio(t2.soma),
-
-        numeroOuVazio(t3.erro),
-        numeroOuVazio(t3.incerteza),
-        numeroOuVazio(t3.soma),
-
-        numeroOuVazio(t4.erro),
-        numeroOuVazio(t4.incerteza),
-        numeroOuVazio(t4.soma),
-
-        c.status || ""
+        incertezaTemperatura,
+        numeroOuVazio(tMenos20.erro),
+        resultadoPonto(tMenos20),
+        numeroOuVazio(tZero.erro),
+        resultadoPonto(tZero),
+        numeroOuVazio(tQuinze.erro),
+        resultadoPonto(tQuinze),
+        numeroOuVazio(tSessenta.erro),
+        resultadoPonto(tSessenta),
+        resultadoTemperatura,
+        numeroOuVazio(u10.incerteza),
+        numeroOuVazio(u10.erro),
+        resultadoPonto(u10),
+        numeroOuVazio(u50.incerteza),
+        numeroOuVazio(u50.erro),
+        resultadoPonto(u50),
+        numeroOuVazio(u90.incerteza),
+        numeroOuVazio(u90.erro),
+        resultadoPonto(u90),
+        resultadoUmidade,
+        resultadoGeral
       ];
 
       row.height = 18;
 
       for (let col = 1; col <= colCount; col++) {
         const cell = row.getCell(col);
-        aplicarPadraoCelula(cell, baseStyle);
+        aplicarPadraoCelula(cell, estilosBase[col - 1]);
 
         // Colunas de soma:
-        // Umidade: 8, 11, 14 → limite dinâmico de umidade.
-        // Temperatura: 17, 20, 23, 26 → limite dinâmico de temperatura.
-        if ([8, 11, 14].includes(col)) {
-          aplicarCorSoma(cell, cell.value, limiteUmidadeRelatorio);
-        }
-
-        if ([17, 20, 23, 26].includes(col)) {
+        // Temperatura: H, J, L, N. Umidade: R, U, X.
+        if ([8, 10, 12, 14].includes(col)) {
           aplicarCorSoma(cell, cell.value, limiteTemperaturaRelatorio);
         }
 
-        if (col === 27) {
+        if ([18, 21, 24].includes(col)) {
+          aplicarCorSoma(cell, cell.value, limiteUmidadeRelatorio);
+        }
+
+        if ([15, 25, 26].includes(col)) {
           aplicarCorResultado(cell, cell.value);
         }
       }
+
+      if (index % 2 === 1) {
+        for (let col = 1; col <= colCount; col++) {
+          if (![8, 10, 12, 14, 15, 18, 21, 24, 25, 26].includes(col)) {
+            row.getCell(col).fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: "F0FBF8" }
+            };
+          }
+        }
+      }
+
+      row.getCell(3).numFmt = "dd/mm/yyyy";
+      for (let col = 6; col <= 24; col++) row.getCell(col).numFmt = "0.00";
     });
 
     if (dados.length === 0) {
@@ -3411,7 +3473,11 @@ Data: ${formatarDataISOParaBR(dataRelatorio)}`;
 
     const ultimaLinhaComDados = dataStartRow + Math.max(dados.length, 1) - 1;
     const ultimaLinha = Math.max(footerStartRow + 6, ultimaLinhaComDados + 8, sheet.rowCount);
-    sheet.pageSetup.printArea = `A1:AA${ultimaLinha}`;
+    sheet.pageSetup.printArea = `A1:Z${ultimaLinha}`;
+    sheet.autoFilter = {
+      from: `A${headerRow}`,
+      to: `Z${ultimaLinhaComDados}`
+    };
 
     sheet.views = [
       {
