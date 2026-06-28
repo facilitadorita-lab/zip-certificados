@@ -3059,7 +3059,19 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
 
     const todos = await r.json();
 
+    if (!r.ok) {
+      const erro = new Error(todos?.message || todos?.error || "Falha ao consultar certificados DLH.");
+      erro.statusCode = 502;
+      throw erro;
+    }
+
     const dados = Array.isArray(todos) ? todos : [];
+
+    if (dados.length === 0) {
+      return res.status(404).json({
+        erro: "Nenhum certificado DLH encontrado no período informado."
+      });
+    }
 
     const criteriosRelatorio = await buscarCriteriosCalibracao();
     const limiteTemperaturaRelatorio = Number(criteriosRelatorio.limite_temperatura ?? 0.5);
@@ -3077,7 +3089,6 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     sheet.pageSetup = {
       paperSize: 9,
       orientation: "landscape",
-      fitToPage: true,
       fitToWidth: 1,
       fitToHeight: 0,
       horizontalCentered: true,
@@ -3514,7 +3525,9 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     sheet.views = [
       {
         state: "frozen",
-        ySplit: headerRow
+        ySplit: headerRow,
+        topLeftCell: `A${dataStartRow}`,
+        activeCell: `A${dataStartRow}`
       }
     ];
 

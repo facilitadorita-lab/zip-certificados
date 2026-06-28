@@ -3297,7 +3297,19 @@ app.get("/relatorio-dia/excel", async (req, res) => {
 
     const todos = await r.json();
 
+    if (!r.ok) {
+      const erro = new Error(todos?.message || todos?.error || "Falha ao consultar certificados DLT.");
+      erro.statusCode = 502;
+      throw erro;
+    }
+
     const dados = Array.isArray(todos) ? todos : [];
+
+    if (dados.length === 0) {
+      return res.status(404).json({
+        erro: "Nenhum certificado DLT encontrado no período informado."
+      });
+    }
 
     const templatePath = path.join(process.cwd(), "modelo-relatorio-dlt.xlsx");
     if (!fs.existsSync(templatePath)) {
@@ -3421,17 +3433,22 @@ app.get("/relatorio-dia/excel", async (req, res) => {
 
     const lastDataRow = firstDataRow + registros.length - 1;
     sheet.autoFilter = { from: `A${headerRow}`, to: `O${lastDataRow}` };
-    sheet.views = [{ state: "frozen", ySplit: headerRow }];
+    sheet.views = [{
+      state: "frozen",
+      ySplit: headerRow,
+      topLeftCell: `A${firstDataRow}`,
+      activeCell: `A${firstDataRow}`
+    }];
     sheet.pageSetup = {
       paperSize: 9,
       orientation: "landscape",
-      fitToPage: true,
       fitToWidth: 1,
       fitToHeight: 0,
       horizontalCentered: true,
       printArea: `A1:O${lastDataRow}`,
       margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 }
     };
+    sheet.headerFooter = sheet.headerFooter || {};
     sheet.headerFooter.oddFooter = "&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
 
     // =========================
