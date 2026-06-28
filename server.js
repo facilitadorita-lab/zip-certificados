@@ -3372,7 +3372,7 @@ app.get("/relatorio-dia/excel", async (req, res) => {
       row.height = 20;
 
       if (!c) {
-        row.values = Array(16).fill(null);
+        row.values = Array(15).fill(null);
         return;
       }
 
@@ -3386,7 +3386,6 @@ app.get("/relatorio-dia/excel", async (req, res) => {
       const status = String(c.status || "").toUpperCase();
 
       row.values = [
-        null,
         String(c.serie || ""),
         normalizarDLT(c.dlt) || "",
         dataExcel(c.data),

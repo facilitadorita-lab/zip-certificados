@@ -3420,7 +3420,6 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
           : String(c.status || "INDETERMINADO").toUpperCase();
 
       row.values = [
-        "",
         c.serie || "",
         normalizarDLH(c.dlh) || c.dlh || "",
         dataExcel(c.data),
