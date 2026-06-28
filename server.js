@@ -258,7 +258,7 @@ async function buscarPerfilUsuario(user) {
   if (cache?.expiraEm > Date.now()) return cache.valor;
 
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo`,
+    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json();
@@ -281,6 +281,8 @@ async function autenticarToken(token) {
 
   const perfil = await buscarPerfilUsuario(data.user);
   if (!perfil.ativo) throw new Error("Usuário desativado");
+
+  if (!perfil.aprovado) throw new Error("Usuario aguardando aprovacao");
 
   const auth = { user: data.user, perfil };
   authCache.set(token, { valor: auth, expiraEm: Date.now() + AUTH_CACHE_MS });
@@ -693,15 +695,24 @@ async function buscarDownloadJobPersistido(jobId, modulo = "DLT") {
   return hidratarDownloadJob(data[0]);
 }
 
-async function listarDownloadJobsPersistidos(modulo = "DLT", limit = 50) {
+async function listarDownloadJobsPersistidos(modulo = "DLT", limit = 50, solicitadoPor = null) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  const filtroUsuario = solicitadoPor
+    ? `&solicitado_por=eq.${encodeURIComponent(solicitadoPor)}`
+    : "";
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}&select=*&order=criado_em.desc&limit=${limit}`,
+    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}${filtroUsuario}&select=*&order=criado_em.desc&limit=${limit}`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json().catch(() => []);
   if (!response.ok || !Array.isArray(data)) return [];
   return data.map(hidratarDownloadJob);
+}
+
+function podeAcessarDownloadJob(req, job) {
+  const role = req.auth?.perfil?.role;
+  if (role === "dev" || role === "administrador") return true;
+  return Boolean(job?.solicitado_por) && job.solicitado_por === req.auth?.user?.id;
 }
 
 function limparNomeArquivo(nome) {
@@ -2092,7 +2103,7 @@ app.post("/automacao/sincronizar", async (req, res) => {
 app.get("/usuarios", async (req, res) => {
   try {
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,criado_em,ultimo_acesso&order=criado_em.desc`,
+      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,aprovado,criado_em,ultimo_acesso&order=criado_em.desc`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
@@ -2145,7 +2156,7 @@ app.patch("/usuarios/:id", async (req, res) => {
   try {
     const id = String(req.params.id);
     const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo`,
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo,aprovado`,
       { headers: supabaseHeaders() }
     );
     const atualData = validarListaSupabase(busca, await busca.json(), "Supabase usuário");
@@ -2155,6 +2166,7 @@ app.patch("/usuarios/:id", async (req, res) => {
     const solicitanteDev = req.auth.perfil.role === "dev";
     const role = req.body?.role === undefined ? atual.role : String(req.body.role);
     const ativo = req.body?.ativo === undefined ? atual.ativo : Boolean(req.body.ativo);
+    const aprovado = req.body?.aprovado === undefined ? atual.aprovado : Boolean(req.body.aprovado);
     const nome = req.body?.nome === undefined ? atual.nome : String(req.body.nome).trim();
 
     if (!["dev", "administrador", "usuario", "auditor"].includes(role)) {
@@ -2163,8 +2175,8 @@ app.patch("/usuarios/:id", async (req, res) => {
     if (!solicitanteDev && (atual.role === "dev" || role === "dev")) {
       return res.status(403).json({ erro: "Somente DEV pode alterar um perfil DEV" });
     }
-    if (id === req.auth.user.id && !ativo) {
-      return res.status(400).json({ erro: "Você não pode desativar o próprio usuário" });
+    if (id === req.auth.user.id && (!ativo || !aprovado)) {
+      return res.status(400).json({ erro: "Você não pode desativar ou reprovar o próprio usuário" });
     }
 
     const response = await fetch(
@@ -2172,7 +2184,7 @@ app.patch("/usuarios/:id", async (req, res) => {
       {
         method: "PATCH",
         headers: { ...supabaseHeaders(), Prefer: "return=representation" },
-        body: JSON.stringify({ nome, role, ativo })
+        body: JSON.stringify({ nome, role, ativo, aprovado })
       }
     );
     const registros = validarListaSupabase(
@@ -2796,7 +2808,11 @@ app.post("/downloads/massa", async (req, res) => {
 app.get("/downloads/massa/historico", async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
-    const jobs = await listarDownloadJobsPersistidos("DLT", limit);
+    const role = req.auth?.perfil?.role;
+    const solicitadoPor = role === "dev" || role === "administrador"
+      ? null
+      : req.auth?.user?.id;
+    const jobs = await listarDownloadJobsPersistidos("DLT", limit, solicitadoPor);
     res.json({ jobs });
   } catch (e) {
     res.status(500).json({ erro: e.message });
@@ -2806,6 +2822,7 @@ app.get("/downloads/massa/historico", async (req, res) => {
 app.get("/downloads/massa/:jobId", async (req, res) => {
   const job = downloadJobs.get(req.params.jobId) || await buscarDownloadJobPersistido(req.params.jobId, "DLT");
   if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+  if (!podeAcessarDownloadJob(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
   res.json(job);
 });
 
@@ -2813,6 +2830,7 @@ app.get("/downloads/massa/:jobId/arquivo", async (req, res) => {
   try {
     const job = downloadJobs.get(req.params.jobId) || await buscarDownloadJobPersistido(req.params.jobId, "DLT");
     if (!job) return res.status(404).json({ erro: "Tarefa não encontrada" });
+    if (!podeAcessarDownloadJob(req, job)) return res.status(403).json({ erro: "Acesso negado a esta tarefa" });
     const temArquivoLocal = job.arquivo_zip_local_path && fs.existsSync(job.arquivo_zip_local_path);
     if (job.status !== "concluido" || (!temArquivoLocal && !job.arquivo_zip_drive_id)) {
       return res.status(409).json({ erro: "O arquivo ZIP ainda não está disponível" });
