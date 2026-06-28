@@ -18,6 +18,18 @@ dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+function origemCorsPermitida(origem, regras) {
+  return regras.some(regra => {
+    if (regra === "*") return true;
+    if (!regra.includes("*")) return regra === origem;
+    const expressao = regra
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, "[^/]+");
+    return new RegExp(`^${expressao}$`, "i").test(origem);
+  });
+}
+
 app.use((req, res, next) => {
   const origem = String(req.headers.origin || "");
   const origensPermitidas = String(process.env.CORS_ORIGIN || "*")
@@ -27,7 +39,7 @@ app.use((req, res, next) => {
   const origemNormalizada = origem.replace(/\/+$/, "");
   if (origensPermitidas.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origensPermitidas.includes(origemNormalizada)) {
+  } else if (origemCorsPermitida(origemNormalizada, origensPermitidas)) {
     res.setHeader("Access-Control-Allow-Origin", origem);
     res.setHeader("Vary", "Origin");
   }
@@ -302,6 +314,48 @@ function papeisPermitidos(req) {
   return ["dev", "administrador", "usuario", "auditor"];
 }
 
+function identificarAcaoAuditoriaDLH(metodo, rota) {
+  if (rota === "/dlh/sync") return ["SINCRONIZAR", "Sincronização DLH iniciada"];
+  if (rota === "/dlh/reprocess") return ["REPROCESSAR", "Reprocessamento DLH iniciado"];
+  if (metodo === "PATCH" && rota === "/dlh/criterios") return ["ALTERAR_DMA", "Critérios DLH alterados"];
+  if (metodo === "DELETE" && rota.startsWith("/dlh/certificados/")) return ["EXCLUIR_CERTIFICADO", "Certificado DLH excluído"];
+  if (metodo === "POST" && rota === "/dlh/downloads/massa") return ["DOWNLOAD_MASSA", "Download em massa DLH solicitado"];
+  if (metodo === "GET" && rota.startsWith("/dlh/downloads/massa/") && rota.endsWith("/arquivo")) return ["BAIXAR_ZIP", "Arquivo ZIP DLH baixado"];
+  if (metodo === "GET" && rota.startsWith("/dlh/download/")) return ["DOWNLOAD_CERTIFICADO", "Certificado DLH baixado"];
+  return null;
+}
+
+function entidadeAuditoriaDLH(rota) {
+  const partes = String(rota || "").split("/").filter(Boolean);
+  const candidato = partes.at(-1);
+  if (!candidato || ["sync", "reprocess", "massa", "arquivo", "criterios"].includes(candidato)) return null;
+  return candidato.slice(0, 160);
+}
+
+async function registrarAuditoriaDLH(req, statusCode, acao, descricao) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !req.auth?.user?.id) return;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/audit_logs`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "return=minimal" },
+      body: JSON.stringify({
+        user_id: req.auth.user.id,
+        user_email: req.auth.user.email || req.auth.perfil?.email || "",
+        action: acao,
+        module: "DLH",
+        entity: entidadeAuditoriaDLH(req.path),
+        description: descricao,
+        request_path: req.path,
+        request_method: req.method,
+        status_code: statusCode
+      })
+    });
+    if (!response.ok) console.warn("Falha ao registrar auditoria DLH:", response.status);
+  } catch (e) {
+    console.warn("Falha ao registrar auditoria DLH:", e.message);
+  }
+}
+
 app.use(async (req, res, next) => {
   if (
     !AUTH_ENABLED ||
@@ -325,6 +379,18 @@ app.use(async (req, res, next) => {
   } catch (e) {
     res.status(401).json({ erro: e.message });
   }
+});
+
+app.use((req, res, next) => {
+  const evento = req.auth ? identificarAcaoAuditoriaDLH(req.method, req.path) : null;
+  if (evento) {
+    res.once("finish", () => {
+      if (res.statusCode >= 200 && res.statusCode < 400) {
+        registrarAuditoriaDLH(req, res.statusCode, evento[0], evento[1]).catch(() => {});
+      }
+    });
+  }
+  next();
 });
 
 function validarSegredoAutomacao(req, res) {
