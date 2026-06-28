@@ -1753,12 +1753,12 @@ async function extrairTabelaPorColunas(buffer) {
     if (!aq || !er || !inc) continue;
 
     const aquecimento = parseBR(aq.text);
-    const erro = Math.abs(parseBR(er.text));
+    const erro = parseBR(er.text);
     const incerteza = Math.abs(parseBR(inc.text));
 
     if (Number.isNaN(aquecimento) || Number.isNaN(erro) || Number.isNaN(incerteza)) continue;
     if (aquecimento < -100 || aquecimento > 200) continue;
-    if (erro > 2 || incerteza > 2) continue;
+    if (Math.abs(erro) > 2 || incerteza > 2) continue;
 
     candidatos.push({
       y: linha.y,
@@ -1807,7 +1807,7 @@ async function extrairTabelaPorColunas(buffer) {
     aquecimento: p.aquecimento,
     erro: p.erro,
     incerteza: p.incerteza,
-    soma: fmt2(p.erro + p.incerteza)
+    soma: fmt2(Math.abs(p.erro) + p.incerteza)
   }));
 
   return { ok: true, pontos };
@@ -3270,15 +3270,130 @@ app.get("/relatorio-dia/excel", async (req, res) => {
       mesmaData(item.criado_em, dataRelatorio)
     );
 
-    const workbook = new ExcelJS.Workbook();
+    const templatePath = path.join(process.cwd(), "modelo-relatorio-dlt.xlsx");
+    if (!fs.existsSync(templatePath)) {
+      throw new Error("Arquivo modelo-relatorio-dlt.xlsx não encontrado no servidor");
+    }
 
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(templatePath);
     workbook.creator = "ITA FRIA";
-    workbook.lastModifiedBy = "Sistema";
-    workbook.created = new Date();
+    workbook.lastModifiedBy = "CalibraFlow";
     workbook.modified = new Date();
 
-    const sheet = workbook.addWorksheet("Relatório DLT");
+    const sheet = workbook.worksheets[0];
+    if (!sheet) throw new Error("O modelo DLT não possui planilha");
 
+    sheet.name = "Relatório DLT";
+    sheet.getCell("A1").value = "REL 06GQ09";
+    sheet.getCell("A2").value = `Versão: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+    sheet.getCell("D1").value = "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T";
+    const criterios = await buscarCriteriosCalibracao();
+    sheet.getCell("I5").value = `DMA: ${String(criterios.limite_dlt ?? 0.5).replace(".", ",")}`;
+
+    const headerRow = 7;
+    const firstDataRow = 8;
+    if (sheet.rowCount > firstDataRow) {
+      sheet.spliceRows(firstDataRow + 1, sheet.rowCount - firstDataRow);
+    }
+
+    // =========================
+    // DADOS
+    // =========================
+
+    const estilosBase = Array.from({ length: 15 }, (_, index) =>
+      JSON.parse(JSON.stringify(sheet.getRow(firstDataRow).getCell(index + 1).style || {}))
+    );
+
+    const numeroOuVazio = valor => {
+      if (valor === null || valor === undefined || valor === "") return "";
+      const numero = Number(valor);
+      return Number.isFinite(numero) ? numero : "";
+    };
+
+    const dataExcel = valor => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(valor || ""))) return "";
+      const [ano, mes, dia] = String(valor).split("-").map(Number);
+      return new Date(ano, mes - 1, dia, 12, 0, 0);
+    };
+
+    const buscarPonto = (pontos, alvo, fallbackIndex) => {
+      const candidatos = pontos
+        .map((ponto, index) => ({ ponto, index, referencia: Number(ponto?.aquecimento ?? ponto?.referencia) }))
+        .filter(item => Number.isFinite(item.referencia))
+        .sort((a, b) => Math.abs(a.referencia - alvo) - Math.abs(b.referencia - alvo));
+      if (candidatos[0] && Math.abs(candidatos[0].referencia - alvo) <= 3) return candidatos[0].ponto;
+      return pontos[fallbackIndex] || {};
+    };
+
+    const resultadoPonto = ponto => {
+      const soma = numeroOuVazio(ponto?.soma);
+      if (soma !== "") return soma;
+      const erro = numeroOuVazio(ponto?.erro);
+      const incerteza = numeroOuVazio(ponto?.incerteza);
+      return erro === "" || incerteza === "" ? "" : Number((Math.abs(erro) + incerteza).toFixed(2));
+    };
+
+    const registros = dados.length ? dados : [null];
+    registros.forEach((c, index) => {
+      const row = sheet.getRow(firstDataRow + index);
+      for (let coluna = 1; coluna <= 15; coluna++) {
+        row.getCell(coluna).style = JSON.parse(JSON.stringify(estilosBase[coluna - 1]));
+      }
+      row.height = 20;
+
+      if (!c) {
+        row.values = Array(16).fill(null);
+        return;
+      }
+
+      const pontos = Array.isArray(c.pontos) ? c.pontos : [];
+      const pMenos20 = buscarPonto(pontos, -20, 0);
+      const pZero = buscarPonto(pontos, 0, 1);
+      const pQuinze = buscarPonto(pontos, 15, 2);
+      const pSessenta = buscarPonto(pontos, 60, 3);
+      const incertezas = pontos.map(p => numeroOuVazio(p?.incerteza)).filter(v => v !== "");
+      const incerteza = incertezas[0] ?? "";
+      const status = String(c.status || "").toUpperCase();
+
+      row.values = [
+        null,
+        String(c.serie || ""),
+        normalizarDLT(c.dlt) || "",
+        dataExcel(c.data),
+        c.mes_ano_validade || "",
+        String(c.certificado || ""),
+        incerteza,
+        numeroOuVazio(pMenos20.erro),
+        resultadoPonto(pMenos20),
+        numeroOuVazio(pZero.erro),
+        resultadoPonto(pZero),
+        numeroOuVazio(pQuinze.erro),
+        resultadoPonto(pQuinze),
+        numeroOuVazio(pSessenta.erro),
+        resultadoPonto(pSessenta),
+        status
+      ];
+
+      if (index % 2 === 1) {
+        for (let coluna = 1; coluna <= 15; coluna++) {
+          row.getCell(coluna).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "F0FBF8" } };
+        }
+      }
+      row.getCell(3).numFmt = "dd/mm/yyyy";
+      for (let coluna = 6; coluna <= 14; coluna++) row.getCell(coluna).numFmt = "0.00";
+      if (status === "APROVADO") {
+        row.getCell(15).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "D9F7F0" } };
+        row.getCell(15).font = { name: "Arial", size: 8, bold: true, color: { argb: "087A67" } };
+      } else if (status === "REPROVADO" || status === "ERRO") {
+        row.getCell(15).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC7CE" } };
+        row.getCell(15).font = { name: "Arial", size: 8, bold: true, color: { argb: "9C0006" } };
+      }
+    });
+
+    const lastDataRow = firstDataRow + registros.length - 1;
+    sheet.autoFilter = { from: `A${headerRow}`, to: `O${lastDataRow}` };
+    sheet.views = [{ state: "frozen", ySplit: headerRow }];
     sheet.pageSetup = {
       paperSize: 9,
       orientation: "landscape",
@@ -3286,259 +3401,10 @@ app.get("/relatorio-dia/excel", async (req, res) => {
       fitToWidth: 1,
       fitToHeight: 0,
       horizontalCentered: true,
-      verticalCentered: false,
-      margins: {
-        left: 0.2,
-        right: 0.2,
-        top: 0.3,
-        bottom: 0.3,
-        header: 0.1,
-        footer: 0.1
-      }
+      printArea: `A1:O${lastDataRow}`,
+      margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 }
     };
-
-    sheet.properties.defaultRowHeight = 20;
-
-    // =========================
-    // CABEÇALHO
-    // =========================
-
-    sheet.mergeCells("A1:C3");
-
-    sheet.getCell("A1").value =
-`REL 06GQ09
-Versão: 00
-Data: ${formatarDataISOParaBR(dataRelatorio)}`;
-
-    sheet.getCell("A1").alignment = {
-      vertical: "middle",
-      horizontal: "left",
-      wrapText: true
-    };
-
-    sheet.getCell("A1").font = {
-      bold: true,
-      size: 9,
-      name: "Arial"
-    };
-
-    sheet.mergeCells("D1:O3");
-
-    sheet.getCell("D1").value =
-"AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T";
-
-    sheet.getCell("D1").alignment = {
-      vertical: "middle",
-      horizontal: "center"
-    };
-
-    sheet.getCell("D1").font = {
-      bold: true,
-      size: 14,
-      name: "Arial"
-    };
-
-    // =========================
-    // BLOCO INSTRUMENTO
-    // =========================
-
-    sheet.mergeCells("A4:C4");
-    sheet.getCell("A4").value = "INSTRUMENTO";
-
-    sheet.mergeCells("D4:O4");
-    sheet.getCell("D4").value =
-"ESPECIFICAÇÕES TEMPERATURA / CRITÉRIOS DE ACEITAÇÃO";
-
-    ["A4", "D4"].forEach(c => {
-      sheet.getCell(c).font = {
-        bold: true,
-        size: 10,
-        name: "Arial"
-      };
-
-      sheet.getCell(c).alignment = {
-        horizontal: "center",
-        vertical: "middle"
-      };
-
-      sheet.getCell(c).fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "D9D9D9" }
-      };
-    });
-
-    sheet.getCell("A5").value = "Marca: TESTO";
-    sheet.getCell("B5").value = "Modelo: 174T";
-    sheet.getCell("C5").value = "Resolução: 0,1";
-    const criterios = await buscarCriteriosCalibracao();
-    sheet.getCell("D5").value = `DMA: ${String(criterios.limite_dlt).replace(".", ",")}`;
-    sheet.getCell("E5").value = "Unidade: °C";
-
-    // =========================
-    // CABEÇALHO TABELA
-    // =========================
-
-    const headerRow = 7;
-
-    sheet.getRow(headerRow).values = [
-      "N° Série",
-      "TAG",
-      "Calibrado em",
-      "Validade",
-      "Certificado",
-      "Incerteza",
-      "-20°C Erro",
-      "-20°C Resultado",
-      "0°C Erro",
-      "0°C Resultado",
-      "15°C Erro",
-      "15°C Resultado",
-      "60°C Erro",
-      "60°C Resultado",
-      "RESULTADO"
-    ];
-
-    sheet.getRow(headerRow).height = 35;
-
-    sheet.getRow(headerRow).font = {
-      bold: true,
-      size: 9,
-      name: "Arial"
-    };
-
-    sheet.getRow(headerRow).alignment = {
-      horizontal: "center",
-      vertical: "middle",
-      wrapText: true
-    };
-
-    sheet.getRow(headerRow).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "BFBFBF" }
-    };
-
-    // =========================
-    // DADOS
-    // =========================
-
-    dados.forEach(c => {
-      const pontos = Array.isArray(c.pontos) ? c.pontos : [];
-
-      const p1 = pontos[0] || {};
-      const p2 = pontos[1] || {};
-      const p3 = pontos[2] || {};
-      const p4 = pontos[3] || {};
-
-      const row = sheet.addRow([
-        c.serie || "",
-        normalizarDLT(c.dlt) || "",
-        formatarDataISOParaBR(c.data),
-        c.mes_ano_validade || "",
-        c.certificado || "",
-        p1.incerteza ?? "",
-        p1.erro ?? "",
-        p1.soma ?? "",
-        p2.erro ?? "",
-        p2.soma ?? "",
-        p3.erro ?? "",
-        p3.soma ?? "",
-        p4.erro ?? "",
-        p4.soma ?? "",
-        c.status || ""
-      ]);
-
-      row.height = 22;
-
-      if (String(c.status || "").toUpperCase() === "APROVADO") {
-        row.getCell(15).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "C6EFCE" }
-        };
-      }
-
-      if (String(c.status || "").toUpperCase() === "REPROVADO") {
-        row.getCell(15).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFC7CE" }
-        };
-      }
-    });
-
-    // =========================
-    // LARGURA COLUNAS
-    // =========================
-
-    const larguras = [
-      16,
-      14,
-      16,
-      16,
-      18,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      12,
-      14
-    ];
-
-    larguras.forEach((w, i) => {
-      sheet.getColumn(i + 1).width = w;
-    });
-
-    // =========================
-    // ESTILO GERAL
-    // =========================
-
-    sheet.eachRow((row, rowNumber) => {
-      row.eachCell(cell => {
-        cell.border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" }
-        };
-
-        cell.alignment = {
-          horizontal: "center",
-          vertical: "middle",
-          wrapText: true
-        };
-
-        if (rowNumber > headerRow) {
-          cell.font = {
-            name: "Arial",
-            size: 8
-          };
-        }
-      });
-    });
-
-    // =========================
-    // CONGELAR CABEÇALHO
-    // =========================
-
-    sheet.views = [
-      {
-        state: "frozen",
-        ySplit: 7
-      }
-    ];
-
-    // =========================
-    // RODAPÉ
-    // =========================
-
-    sheet.headerFooter.oddFooter =
-"&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
+    sheet.headerFooter.oddFooter = "&LResp:&C Sistema de Gestão da Qualidade ITA FRIA&R Página &P de &N";
 
     // =========================
     // NOME ARQUIVO
