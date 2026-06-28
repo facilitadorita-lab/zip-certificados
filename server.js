@@ -18,6 +18,18 @@ dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+function origemCorsPermitida(origem, regras) {
+  return regras.some(regra => {
+    if (regra === "*") return true;
+    if (!regra.includes("*")) return regra === origem;
+    const expressao = regra
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, "[^/]+");
+    return new RegExp(`^${expressao}$`, "i").test(origem);
+  });
+}
+
 app.use((req, res, next) => {
   const origem = String(req.headers.origin || "");
   const origensPermitidas = String(process.env.CORS_ORIGIN || "*")
@@ -27,7 +39,7 @@ app.use((req, res, next) => {
   const origemNormalizada = origem.replace(/\/+$/, "");
   if (origensPermitidas.includes("*")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
-  } else if (origensPermitidas.includes(origemNormalizada)) {
+  } else if (origemCorsPermitida(origemNormalizada, origensPermitidas)) {
     res.setHeader("Access-Control-Allow-Origin", origem);
     res.setHeader("Vary", "Origin");
   }
@@ -294,6 +306,7 @@ function papeisPermitidos(req) {
   const metodo = req.method;
 
   if (rota.startsWith("/metricas")) return ["dev"];
+  if (rota.startsWith("/auditoria")) return ["dev", "administrador"];
   if (rota.startsWith("/usuarios")) return ["dev", "administrador"];
   if (
     metodo === "DELETE" ||
@@ -308,6 +321,53 @@ function papeisPermitidos(req) {
   }
 
   return ["dev", "administrador", "usuario", "auditor"];
+}
+
+function identificarAcaoAuditoria(metodo, rota) {
+  if (rota === "/sync") return ["SINCRONIZAR", "Sincronização DLT iniciada"];
+  if (rota === "/reprocess") return ["REPROCESSAR", "Reprocessamento DLT iniciado"];
+  if (metodo === "PATCH" && rota === "/criterios") return ["ALTERAR_DMA", "Critérios DLT alterados"];
+  if (metodo === "POST" && rota === "/usuarios/convidar") return ["CONVIDAR_USUARIO", "Convite de usuário solicitado"];
+  if (metodo === "PATCH" && rota.startsWith("/usuarios/")) return ["ALTERAR_USUARIO", "Cadastro de usuário alterado"];
+  if (metodo === "DELETE" && rota.startsWith("/certificados/")) return ["EXCLUIR_CERTIFICADO", "Certificado DLT excluído"];
+  if (metodo === "POST" && rota === "/downloads/massa") return ["DOWNLOAD_MASSA", "Download em massa DLT solicitado"];
+  if (metodo === "GET" && rota.startsWith("/downloads/massa/") && rota.endsWith("/arquivo")) return ["BAIXAR_ZIP", "Arquivo ZIP DLT baixado"];
+  if (metodo === "GET" && rota.startsWith("/download/")) return ["DOWNLOAD_CERTIFICADO", "Certificado DLT baixado"];
+  if (metodo === "GET" && rota === "/relatorio-dia") return ["GERAR_RELATORIO", "Relatório diário DLT gerado"];
+  return null;
+}
+
+function entidadeAuditoria(rota) {
+  const partes = String(rota || "").split("/").filter(Boolean);
+  const candidato = partes.at(-1);
+  if (!candidato || ["sync", "reprocess", "massa", "arquivo", "criterios", "convidar", "relatorio-dia"].includes(candidato)) {
+    return null;
+  }
+  return candidato.slice(0, 160);
+}
+
+async function registrarAuditoria(req, statusCode, acao, descricao) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !req.auth?.user?.id) return;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/audit_logs`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "return=minimal" },
+      body: JSON.stringify({
+        user_id: req.auth.user.id,
+        user_email: req.auth.user.email || req.auth.perfil?.email || "",
+        action: acao,
+        module: "DLT",
+        entity: entidadeAuditoria(req.path),
+        description: descricao,
+        request_path: req.path,
+        request_method: req.method,
+        status_code: statusCode
+      })
+    });
+    if (!response.ok) console.warn("Falha ao registrar auditoria DLT:", response.status);
+  } catch (e) {
+    console.warn("Falha ao registrar auditoria DLT:", e.message);
+  }
 }
 
 app.use(async (req, res, next) => {
@@ -333,6 +393,18 @@ app.use(async (req, res, next) => {
   } catch (e) {
     res.status(401).json({ erro: e.message });
   }
+});
+
+app.use((req, res, next) => {
+  const evento = req.auth ? identificarAcaoAuditoria(req.method, req.path) : null;
+  if (evento) {
+    res.once("finish", () => {
+      if (res.statusCode >= 200 && res.statusCode < 400) {
+        registrarAuditoria(req, res.statusCode, evento[0], evento[1]).catch(() => {});
+      }
+    });
+  }
+  next();
 });
 
 function validarSegredoAutomacao(req, res) {
@@ -2049,6 +2121,47 @@ app.get("/auth/me", (req, res) => {
     },
     perfil: req.auth.perfil
   });
+});
+
+app.get("/auditoria", async (req, res) => {
+  try {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 200)));
+    const modulo = String(req.query.modulo || "").trim().toUpperCase();
+    const acao = String(req.query.acao || "").trim().toUpperCase();
+    const inicio = String(req.query.inicio || "").trim();
+    const fim = String(req.query.fim || "").trim();
+    const busca = String(req.query.busca || "")
+      .trim()
+      .replace(/[,().*]/g, " ")
+      .replace(/\s+/g, " ")
+      .slice(0, 100);
+
+    const params = new URLSearchParams({
+      select: "id,created_at,user_id,user_email,action,module,entity,description,status_code",
+      order: "created_at.desc",
+      limit: String(limit)
+    });
+    if (["DLT", "DLH"].includes(modulo)) params.set("module", `eq.${modulo}`);
+    if (acao) params.set("action", `eq.${acao}`);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(inicio)) params.set("created_at", `gte.${inicio}T00:00:00-03:00`);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fim)) params.append("created_at", `lte.${fim}T23:59:59.999-03:00`);
+    if (busca) {
+      params.set(
+        "or",
+        `(user_email.ilike.*${busca}*,description.ilike.*${busca}*,entity.ilike.*${busca}*)`
+      );
+    }
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/audit_logs?${params}`, {
+      headers: supabaseHeaders()
+    });
+    const data = await response.json();
+    const registros = validarListaSupabase(response, data, "Supabase auditoria");
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ total: registros.length, registros });
+  } catch (e) {
+    res.status(500).json({ erro: "Não foi possível carregar os registros de auditoria" });
+  }
 });
 
 app.get("/automacao/status", async (req, res) => {
