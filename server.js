@@ -682,6 +682,40 @@ function mesmaData(dataIsoA, dataIsoB) {
   return String(dataIsoA || "").slice(0, 10) === String(dataIsoB || "").slice(0, 10);
 }
 
+function obterIntervaloRelatorio(query = {}) {
+  const dataUnica = String(query.data || "").trim();
+  const dataInicio = String(query.data_inicio || query.inicio || dataUnica || obterHojeISO()).trim();
+  const dataFim = String(query.data_fim || query.fim || dataUnica || dataInicio).trim();
+  const formatoISO = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!formatoISO.test(dataInicio) || !formatoISO.test(dataFim)) {
+    const erro = new Error("Informe data_inicio e data_fim no formato AAAA-MM-DD.");
+    erro.statusCode = 400;
+    throw erro;
+  }
+
+  if (dataInicio > dataFim) {
+    const erro = new Error("data_inicio não pode ser posterior a data_fim.");
+    erro.statusCode = 400;
+    throw erro;
+  }
+
+  const periodoFormatado = dataInicio === dataFim
+    ? formatarDataISOParaBR(dataInicio)
+    : `${formatarDataISOParaBR(dataInicio)} a ${formatarDataISOParaBR(dataFim)}`;
+
+  return {
+    dataInicio,
+    dataFim,
+    periodoFormatado,
+    sufixoArquivo: dataInicio === dataFim ? dataInicio : `${dataInicio}_a_${dataFim}`
+  };
+}
+
+function montarUrlRelatorio(tabela, dataInicio, dataFim, ordenacao) {
+  return `${SUPABASE_URL}/rest/v1/${tabela}?select=*&data=gte.${dataInicio}&data=lte.${dataFim}&order=${ordenacao}`;
+}
+
 function escaparHtml(valor) {
   return String(valor ?? "")
     .replace(/&/g, "&amp;")
@@ -1315,7 +1349,7 @@ function montarLogoHtml() {
   `;
 }
 
-function montarHtmlRelatorioDia(registros, dataRelatorio, dma = 0.5) {
+function montarHtmlRelatorioDia(registros, periodoRelatorio, dma = 0.5) {
   const grupos = agruparRegistrosPorDLT(registros);
 
   const total = registros.length;
@@ -1546,7 +1580,7 @@ function montarHtmlRelatorioDia(registros, dataRelatorio, dma = 0.5) {
             <div class="versao">
               <div><strong>REL 06G009</strong></div>
               <div>Versão: 00</div>
-              <div>Data: ${escaparHtml(formatarDataISOParaBR(dataRelatorio))}</div>
+              <div>Período: ${escaparHtml(periodoRelatorio)}</div>
             </div>
 
             <div class="titulo">
@@ -1585,7 +1619,7 @@ function montarHtmlRelatorioDia(registros, dataRelatorio, dma = 0.5) {
           </div>
         </div>
 
-        ${secoes || `<div class="subtitulo">Nenhum processamento encontrado para ${escaparHtml(formatarDataISOParaBR(dataRelatorio))}.</div>`}
+        ${secoes || `<div class="subtitulo">Nenhum certificado encontrado no período ${escaparHtml(periodoRelatorio)}.</div>`}
 
         <div class="rodape">
           <div>Sistema de Gestão da Qualidade ITA FRIA</div>
@@ -3135,48 +3169,47 @@ app.delete("/certificados/:id", async (req, res) => {
 
 app.get("/relatorio-dia/dados", async (req, res) => {
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado } = obterIntervaloRelatorio(req.query);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados", dataInicio, dataFim, "dlt.asc,data.asc,serie.asc"),
       { headers: supabaseHeaders() }
     );
 
     const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     res.json({
-      data_relatorio: dataRelatorio,
+      data_relatorio: dataInicio === dataFim ? dataInicio : null,
+      data_inicio: dataInicio,
+      data_fim: dataFim,
+      periodo: periodoFormatado,
       total: dados.length,
       registros: dados
     });
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });
 
 app.get("/relatorio-dia/html", async (req, res) => {
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado } = obterIntervaloRelatorio(req.query);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados", dataInicio, dataFim, "dlt.asc,data.asc,serie.asc"),
       { headers: supabaseHeaders() }
     );
 
     const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
+    const html = montarHtmlRelatorioDia(dados, periodoFormatado, criterios.limite_dlt);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });
 
@@ -3184,22 +3217,20 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
   let browser;
 
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
     const salvar = String(req.query.salvar || "0") === "1";
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados", dataInicio, dataFim, "dlt.asc,data.asc,serie.asc"),
       { headers: supabaseHeaders() }
     );
 
     const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, dataRelatorio, criterios.limite_dlt);
-    const nomeArquivo = `RELATORIO_DIARIO_174T_${dataRelatorio}.pdf`;
+    const html = montarHtmlRelatorioDia(dados, periodoFormatado, criterios.limite_dlt);
+    const nomeArquivo = `RELATORIO_174T_${sufixoArquivo}.pdf`;
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -3230,7 +3261,7 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
         method: "POST",
         headers: supabaseHeaders(),
         body: JSON.stringify({
-          data_relatorio: dataRelatorio,
+          data_relatorio: dataInicio,
           nome_arquivo: nomeArquivo,
           drive_file_id: arquivoDrive.id || null,
           drive_link: arquivoDrive.webViewLink || arquivoDrive.webContentLink || null,
@@ -3249,16 +3280,16 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
     if (browser) {
       await browser.close();
     }
-    res.status(500).json({ erro: e.message });
+    res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });
 
 app.get("/relatorio-dia/excel", async (req, res) => {
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?select=*&order=dlt.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados", dataInicio, dataFim, "dlt.asc,data.asc,serie.asc"),
       {
         headers: supabaseHeaders()
       }
@@ -3266,9 +3297,7 @@ app.get("/relatorio-dia/excel", async (req, res) => {
 
     const todos = await r.json();
 
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     const templatePath = path.join(process.cwd(), "modelo-relatorio-dlt.xlsx");
     if (!fs.existsSync(templatePath)) {
@@ -3286,7 +3315,7 @@ app.get("/relatorio-dia/excel", async (req, res) => {
 
     sheet.name = "Relatório DLT";
     sheet.getCell("A1").value = "REL 06GQ09";
-    sheet.getCell("A2").value = `Versão: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+    sheet.getCell("A2").value = `Versão: 00   Período: ${periodoFormatado}`;
     sheet.getCell("D1").value = "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T";
     const criterios = await buscarCriteriosCalibracao();
     sheet.getCell("I5").value = `DMA: ${String(criterios.limite_dlt ?? 0.5).replace(".", ",")}`;
@@ -3410,8 +3439,7 @@ app.get("/relatorio-dia/excel", async (req, res) => {
     // NOME ARQUIVO
     // =========================
 
-    const nomeArquivo =
-`RELATORIO_DIARIO_174T_${dataRelatorio}.xlsx`;
+    const nomeArquivo = `RELATORIO_174T_${sufixoArquivo}.xlsx`;
 
     res.setHeader(
       "Content-Type",
@@ -3430,14 +3458,17 @@ app.get("/relatorio-dia/excel", async (req, res) => {
   } catch (e) {
     console.error(e);
 
-    return res.status(500).json({
+    return res.status(e.statusCode || 500).json({
       erro: e.message
     });
   }
 });
 
 app.get("/relatorio-dia", async (req, res) => {
-  res.redirect("/relatorio-dia/html");
+  const queryString = req.originalUrl.includes("?")
+    ? req.originalUrl.slice(req.originalUrl.indexOf("?"))
+    : "";
+  res.redirect(`/relatorio-dia/html${queryString}`);
 });
 
 app.listen(PORT, () => {

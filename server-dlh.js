@@ -989,6 +989,40 @@ function mesmaData(dataIsoA, dataIsoB) {
   return String(dataIsoA || "").slice(0, 10) === String(dataIsoB || "").slice(0, 10);
 }
 
+function obterIntervaloRelatorio(query = {}) {
+  const dataUnica = String(query.data || "").trim();
+  const dataInicio = String(query.data_inicio || query.inicio || dataUnica || obterHojeISO()).trim();
+  const dataFim = String(query.data_fim || query.fim || dataUnica || dataInicio).trim();
+  const formatoISO = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!formatoISO.test(dataInicio) || !formatoISO.test(dataFim)) {
+    const erro = new Error("Informe data_inicio e data_fim no formato AAAA-MM-DD.");
+    erro.statusCode = 400;
+    throw erro;
+  }
+
+  if (dataInicio > dataFim) {
+    const erro = new Error("data_inicio não pode ser posterior a data_fim.");
+    erro.statusCode = 400;
+    throw erro;
+  }
+
+  const periodoFormatado = dataInicio === dataFim
+    ? formatarDataISOParaBR(dataInicio)
+    : `${formatarDataISOParaBR(dataInicio)} a ${formatarDataISOParaBR(dataFim)}`;
+
+  return {
+    dataInicio,
+    dataFim,
+    periodoFormatado,
+    sufixoArquivo: dataInicio === dataFim ? dataInicio : `${dataInicio}_a_${dataFim}`
+  };
+}
+
+function montarUrlRelatorio(tabela, dataInicio, dataFim, ordenacao) {
+  return `${SUPABASE_URL}/rest/v1/${tabela}?select=*&data=gte.${dataInicio}&data=lte.${dataFim}&order=${ordenacao}`;
+}
+
 function montarNomePadrao(dlh, serie, dataISO) {
   const tag = normalizarDLH(dlh);
   const dataFormatada = formatarDataISOParaNome(dataISO);
@@ -2966,34 +3000,35 @@ app.delete("/dlh/certificados/:id", async (req, res) => {
 
 app.get("/dlh/relatorio-dia/dados", async (req, res) => {
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado } = obterIntervaloRelatorio(req.query);
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados_dlh", dataInicio, dataFim, "dlh.asc,data.asc,serie.asc"),
       { headers: supabaseHeaders() }
     );
 
     const todos = await r.json();
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     const criterios = await buscarCriteriosCalibracao();
 
     res.json({
-      data_relatorio: dataRelatorio,
+      data_relatorio: dataInicio === dataFim ? dataInicio : null,
+      data_inicio: dataInicio,
+      data_fim: dataFim,
+      periodo: periodoFormatado,
       total: dados.length,
       criterios_aceitacao: criterios,
       registros: dados
     });
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });
 
 app.get("/dlh/relatorio-dia/excel", async (req, res) => {
   try {
-    const dataRelatorio = req.query.data || obterHojeISO();
+    const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
 
     if (!fs.existsSync(MODELO_RELATORIO_PATH)) {
       throw new Error(
@@ -3018,22 +3053,20 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
     sheet.name = "Relatorio DLH";
 
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=*&order=dlh.asc,data.asc,serie.asc`,
+      montarUrlRelatorio("certificados_dlh", dataInicio, dataFim, "dlh.asc,data.asc,serie.asc"),
       { headers: supabaseHeaders() }
     );
 
     const todos = await r.json();
 
-    const dados = (Array.isArray(todos) ? todos : []).filter(item =>
-      mesmaData(item.criado_em, dataRelatorio)
-    );
+    const dados = Array.isArray(todos) ? todos : [];
 
     const criteriosRelatorio = await buscarCriteriosCalibracao();
     const limiteTemperaturaRelatorio = Number(criteriosRelatorio.limite_temperatura ?? 0.5);
     const limiteUmidadeRelatorio = Number(criteriosRelatorio.limite_umidade ?? 5.0);
 
     sheet.getCell("A1").value = "REL 06GQ10";
-    sheet.getCell("A2").value = `Versao: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+    sheet.getCell("A2").value = `Versao: 00   Periodo: ${periodoFormatado}`;
     sheet.getCell("D1").value = "AVALIACAO DOS CERTIFICADOS DE CALIBRACAO - TESTO 174H";
     sheet.getCell("I5").value = `DMA temperatura: ${String(limiteTemperaturaRelatorio).replace(".", ",")} °C`;
     sheet.getCell("S5").value = `DMA umidade: ${String(limiteUmidadeRelatorio).replace(".", ",")} %UR`;
@@ -3184,11 +3217,11 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
           const t = valorTexto(cell).toUpperCase();
 
           if (t.includes("DATA DO RELATÓRIO")) {
-            cell.value = `Data do relatório: ${formatarDataISOParaBR(dataRelatorio)}`;
+            cell.value = `Periodo do relatorio: ${periodoFormatado}`;
           }
 
           if (t.startsWith("DATA:") || t === "DATA") {
-            cell.value = `Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+            cell.value = `Periodo: ${periodoFormatado}`;
           }
         });
       });
@@ -3197,7 +3230,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
 
       if (!a1 || a1.includes("REL")) {
         sheet.getCell("A1").value = "REL 06GQ10";
-        sheet.getCell("A2").value = `Versao: 00   Data: ${formatarDataISOParaBR(dataRelatorio)}`;
+        sheet.getCell("A2").value = `Versao: 00   Periodo: ${periodoFormatado}`;
         sheet.getCell("A1").alignment = {
           horizontal: "left",
           vertical: "middle",
@@ -3486,7 +3519,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
       }
     ];
 
-    const nomeArquivo = `RELATORIO_DIARIO_DLH_${dataRelatorio}.xlsx`;
+    const nomeArquivo = `RELATORIO_DLH_${sufixoArquivo}.xlsx`;
 
     res.setHeader(
       "Content-Type",
@@ -3503,7 +3536,7 @@ app.get("/dlh/relatorio-dia/excel", async (req, res) => {
   } catch (e) {
     console.error(e);
 
-    return res.status(500).json({
+    return res.status(e.statusCode || 500).json({
       erro: e.message
     });
   }
