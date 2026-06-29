@@ -6,7 +6,6 @@ import fetchNative from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
-import { chromium } from "playwright";
 import os from "os";
 import crypto from "crypto";
 import zlib from "zlib";
@@ -14,6 +13,10 @@ import archiver from "archiver";
 import dns from "dns";
 import { createClient } from "@supabase/supabase-js";
 import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
+
+// Instala e usa o Chromium dentro do pacote, sem depender do cache do Render.
+process.env.PLAYWRIGHT_BROWSERS_PATH ||= "0";
+const { chromium } = await import("playwright");
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -2603,6 +2606,24 @@ app.get("/dlh/status/google", async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, servico: "google_drive", erro: e.message });
+  }
+});
+
+app.get("/dlh/status/pdf", (req, res) => {
+  try {
+    const navegadorInstalado = fs.existsSync(chromium.executablePath());
+    return res.status(navegadorInstalado ? 200 : 503).json({
+      ok: navegadorInstalado,
+      servico: "pdf",
+      navegador_instalado: navegadorInstalado
+    });
+  } catch (e) {
+    return res.status(503).json({
+      ok: false,
+      servico: "pdf",
+      navegador_instalado: false,
+      erro: "Navegador PDF indisponivel"
+    });
   }
 });
 
