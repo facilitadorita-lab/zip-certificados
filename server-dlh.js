@@ -6,6 +6,7 @@ import fetchNative from "node-fetch";
 import { google } from "googleapis";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import ExcelJS from "exceljs";
+import { chromium } from "playwright";
 import os from "os";
 import crypto from "crypto";
 import zlib from "zlib";
@@ -1682,6 +1683,120 @@ async function buscarCriteriosCalibracao() {
   }
 }
 
+function montarHtmlRelatorioPdfDLH(registros, periodoRelatorio, limiteTemperatura = 0.5, limiteUmidade = 5) {
+  const html = valor => String(valor ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+  const numero = valor => {
+    const n = Number(valor);
+    return Number.isFinite(n) ? n.toFixed(2).replace(".", ",") : "-";
+  };
+  const buscarPonto = (pontos, alvo, fallbackIndex) => {
+    const lista = Array.isArray(pontos) ? pontos : [];
+    const candidatos = lista
+      .map(ponto => ({ ponto, referencia: Number(ponto?.padrao ?? ponto?.referencia) }))
+      .filter(item => Number.isFinite(item.referencia))
+      .sort((a, b) => Math.abs(a.referencia - alvo) - Math.abs(b.referencia - alvo));
+    return candidatos[0] && Math.abs(candidatos[0].referencia - alvo) <= 3
+      ? candidatos[0].ponto
+      : lista[fallbackIndex] || {};
+  };
+  const resultadoPonto = ponto => {
+    const soma = Number(ponto?.soma);
+    if (Number.isFinite(soma)) return soma;
+    const erro = Number(ponto?.erro);
+    const incerteza = Number(ponto?.incerteza);
+    return Number.isFinite(erro) && Number.isFinite(incerteza)
+      ? Math.abs(erro) + Math.abs(incerteza)
+      : null;
+  };
+  const resultadoGrupo = (pontos, limite, quantidade) => {
+    const resultados = pontos.map(resultadoPonto).filter(Number.isFinite);
+    if (resultados.length < quantidade) return "INDETERMINADO";
+    return resultados.every(valor => valor <= Number(limite)) ? "APROVADO" : "REPROVADO";
+  };
+  const classeSoma = (valor, limite) => Number.isFinite(valor) && valor <= Number(limite) ? "ok" : "bad";
+  const classeStatus = status => status === "APROVADO" ? "ok status" : status === "REPROVADO" ? "bad status" : "warn status";
+
+  const linhas = registros.map((c, index) => {
+    const temperatura = Array.isArray(c.pontos_temperatura) ? c.pontos_temperatura : [];
+    const umidade = Array.isArray(c.pontos_umidade) ? c.pontos_umidade : [];
+    const t20 = buscarPonto(temperatura, -20, 0);
+    const t0 = buscarPonto(temperatura, 0, 1);
+    const t15 = buscarPonto(temperatura, 15, 2);
+    const t60 = buscarPonto(temperatura, 60, 3);
+    const u10 = buscarPonto(umidade, 10, 0);
+    const u50 = buscarPonto(umidade, 50, 1);
+    const u90 = buscarPonto(umidade, 90, 2);
+    const pontosT = [t20, t0, t15, t60];
+    const pontosU = [u10, u50, u90];
+    const resultadoT = resultadoGrupo(temperatura, limiteTemperatura, 4);
+    const resultadoU = resultadoGrupo(umidade, limiteUmidade, 3);
+    const geral = resultadoT === "REPROVADO" || resultadoU === "REPROVADO"
+      ? "REPROVADO"
+      : resultadoT === "APROVADO" && resultadoU === "APROVADO"
+        ? "APROVADO"
+        : String(c.status || "INDETERMINADO").toUpperCase();
+    const incertezaT = temperatura.map(p => Number(p?.incerteza)).find(Number.isFinite);
+
+    return `<tr class="${index % 2 ? "alt" : ""}">
+      <td>${html(c.serie || "")}</td><td>${html(normalizarDLH(c.dlh) || c.dlh || "")}</td>
+      <td>${html(formatarDataISOParaBR(c.data))}</td><td>${html(c.mes_ano_validade || "")}</td><td>${html(c.certificado || "")}</td>
+      <td>${numero(incertezaT)}</td>
+      ${pontosT.map(p => { const soma = resultadoPonto(p); return `<td>${numero(p?.erro)}</td><td class="${classeSoma(soma, limiteTemperatura)}">${numero(soma)}</td>`; }).join("")}
+      <td class="${classeStatus(resultadoT)}">${resultadoT}</td>
+      ${pontosU.map(p => { const soma = resultadoPonto(p); return `<td>${numero(p?.incerteza)}</td><td>${numero(p?.erro)}</td><td class="${classeSoma(soma, limiteUmidade)}">${numero(soma)}</td>`; }).join("")}
+      <td class="${classeStatus(resultadoU)}">${resultadoU}</td><td class="${classeStatus(geral)}">${geral}</td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><style>
+    @page { size: A3 landscape; margin: 7mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #10233f; font-family: Arial, sans-serif; font-size: 6.4px; }
+    .cabecalho { border: 1px solid #0b2855; margin-bottom: 5px; }
+    .topo { display: grid; grid-template-columns: 180px 1fr 180px; align-items: center; min-height: 46px; border-bottom: 1px solid #0b2855; }
+    .codigo { padding: 6px; line-height: 1.45; }
+    .titulo { color: #0b2855; font-size: 12px; font-weight: 700; text-align: center; }
+    .marca { padding-right: 10px; color: #0b2855; font-size: 20px; font-weight: 700; text-align: right; }
+    .marca span { color: #27d3ae; }
+    .meta { display: grid; grid-template-columns: repeat(5, 1fr); background: #ddf7f1; }
+    .meta div { padding: 4px 6px; border-right: 1px solid #0b2855; }
+    .meta div:last-child { border-right: 0; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; }
+    th, td { border: 1px solid #8aa2b8; padding: 2.5px 1.5px; text-align: center; vertical-align: middle; overflow-wrap: anywhere; }
+    th { color: white; background: #0b2855; font-weight: 700; }
+    th.temp { background: #147b82; } th.umid { background: #198f78; }
+    tr.alt td { background: #f0fbf8; }
+    td.ok { color: #087f5b; background: #d7f5e9 !important; font-weight: 700; }
+    td.bad { color: #b42318; background: #fee4e2 !important; font-weight: 700; }
+    td.warn { color: #8a5b00; background: #fff3cd !important; font-weight: 700; }
+    td.status { font-size: 5.7px; }
+    .legenda { margin-top: 4px; display: flex; justify-content: space-between; color: #52677d; font-size: 6px; }
+  </style></head><body>
+    <div class="cabecalho"><div class="topo">
+      <div class="codigo"><strong>REL 06GQ10</strong><br>Vers&atilde;o: 00<br>Per&iacute;odo: ${html(periodoRelatorio)}</div>
+      <div class="titulo">AVALIA&Ccedil;&Atilde;O DOS CERTIFICADOS DE CALIBRA&Ccedil;&Atilde;O - TESTO 174H</div>
+      <div class="marca">Calibra<span>Flow</span></div>
+    </div><div class="meta">
+      <div><strong>Instrumento:</strong> TESTO</div><div><strong>Modelo:</strong> 174H</div>
+      <div><strong>DMA temperatura:</strong> ${numero(limiteTemperatura)} &deg;C</div>
+      <div><strong>DMA umidade:</strong> ${numero(limiteUmidade)} %UR</div><div><strong>Total:</strong> ${registros.length}</div>
+    </div></div>
+    <table><thead><tr>
+      <th rowspan="2">N&deg; S&eacute;rie</th><th rowspan="2">TAG</th><th rowspan="2">Calibrado em</th><th rowspan="2">Validade</th><th rowspan="2">Certificado</th>
+      <th class="temp" rowspan="2">Incerteza T</th><th class="temp" colspan="2">-20&deg;C</th><th class="temp" colspan="2">0&deg;C</th><th class="temp" colspan="2">15&deg;C</th><th class="temp" colspan="2">60&deg;C</th><th class="temp" rowspan="2">Resultado T</th>
+      <th class="umid" colspan="3">10% UR</th><th class="umid" colspan="3">50% UR</th><th class="umid" colspan="3">90% UR</th><th class="umid" rowspan="2">Resultado UR</th><th rowspan="2">RESULTADO</th>
+    </tr><tr>${Array.from({ length: 4 }, () => "<th>Erro</th><th>Soma</th>").join("")}${Array.from({ length: 3 }, () => "<th>Inc.</th><th>Erro</th><th>Soma</th>").join("")}</tr></thead><tbody>${linhas}</tbody></table>
+    <div class="legenda"><span>Soma = |erro| + incerteza. Resultado comparado ao DMA configurado.</span><span>CalibraFlow - Gest&atilde;o de Certificados</span></div>
+  </body></html>`;
+}
+
 function minutosDoHorario(valor) {
   const [hora, minuto] = String(valor).split(":").map(Number);
   return hora * 60 + minuto;
@@ -3023,6 +3138,55 @@ app.get("/dlh/relatorio-dia/dados", async (req, res) => {
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/relatorio-dia/pdf", async (req, res) => {
+  let browser;
+  try {
+    const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
+    const r = await fetch(
+      montarUrlRelatorio("certificados_dlh", dataInicio, dataFim, "dlh.asc,data.asc,serie.asc"),
+      { headers: supabaseHeaders() }
+    );
+    const todos = await r.json();
+    if (!r.ok) {
+      const erro = new Error(todos?.message || todos?.error || "Falha ao consultar certificados DLH.");
+      erro.statusCode = 502;
+      throw erro;
+    }
+    const dados = Array.isArray(todos) ? todos : [];
+    if (dados.length === 0) {
+      return res.status(404).json({ erro: "Nenhum certificado DLH encontrado no periodo informado." });
+    }
+
+    const criterios = await buscarCriteriosCalibracao();
+    const html = montarHtmlRelatorioPdfDLH(
+      dados,
+      periodoFormatado,
+      Number(criterios.limite_temperatura ?? 0.5),
+      Number(criterios.limite_umidade ?? 5)
+    );
+    const nomeArquivo = `RELATORIO_DLH_${sufixoArquivo}.pdf`;
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    const pdf = await page.pdf({
+      format: "A3",
+      landscape: true,
+      printBackground: true,
+      margin: { top: "7mm", right: "7mm", bottom: "7mm", left: "7mm" }
+    });
+    await browser.close();
+    browser = null;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
+    return res.send(pdf);
+  } catch (e) {
+    if (browser) await browser.close();
+    return res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });
 

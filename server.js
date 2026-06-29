@@ -1699,6 +1699,94 @@ async function extrairTextoELinhasDoPDF(buffer) {
   return { texto, items, linhas };
 }
 
+function montarHtmlRelatorioPdfDLT(registros, periodoRelatorio, dma = 0.5) {
+  const numero = valor => {
+    const n = Number(valor);
+    return Number.isFinite(n) ? n.toFixed(2).replace(".", ",") : "-";
+  };
+  const buscarPonto = (pontos, alvo, fallbackIndex) => {
+    const lista = Array.isArray(pontos) ? pontos : [];
+    const candidatos = lista
+      .map(ponto => ({ ponto, referencia: Number(ponto?.aquecimento ?? ponto?.referencia ?? ponto?.padrao) }))
+      .filter(item => Number.isFinite(item.referencia))
+      .sort((a, b) => Math.abs(a.referencia - alvo) - Math.abs(b.referencia - alvo));
+    return candidatos[0] && Math.abs(candidatos[0].referencia - alvo) <= 3
+      ? candidatos[0].ponto
+      : lista[fallbackIndex] || {};
+  };
+  const resultadoPonto = ponto => {
+    const soma = Number(ponto?.soma);
+    if (Number.isFinite(soma)) return soma;
+    const erro = Number(ponto?.erro);
+    const incerteza = Number(ponto?.incerteza);
+    return Number.isFinite(erro) && Number.isFinite(incerteza)
+      ? Math.abs(erro) + Math.abs(incerteza)
+      : null;
+  };
+  const classeResultado = valor => Number.isFinite(valor) && valor <= Number(dma) ? "ok" : "bad";
+
+  const linhas = registros.map((c, index) => {
+    const pontos = Array.isArray(c.pontos) ? c.pontos : [];
+    const p20 = buscarPonto(pontos, -20, 0);
+    const p0 = buscarPonto(pontos, 0, 1);
+    const p15 = buscarPonto(pontos, 15, 2);
+    const p60 = buscarPonto(pontos, 60, 3);
+    const resultados = [p20, p0, p15, p60].map(resultadoPonto);
+    const status = String(c.status || "INDETERMINADO").toUpperCase();
+    const incerteza = pontos.map(p => Number(p?.incerteza)).find(Number.isFinite);
+    return `<tr class="${index % 2 ? "alt" : ""}">
+      <td>${escaparHtml(c.serie || "")}</td>
+      <td>${escaparHtml(normalizarDLT(c.dlt) || c.dlt || "")}</td>
+      <td>${escaparHtml(formatarDataISOParaBR(c.data))}</td>
+      <td>${escaparHtml(c.mes_ano_validade || "")}</td>
+      <td>${escaparHtml(c.certificado || "")}</td>
+      <td>${numero(incerteza)}</td>
+      ${[p20, p0, p15, p60].map((ponto, i) => `<td>${numero(ponto?.erro)}</td><td class="${classeResultado(resultados[i])}">${numero(resultados[i])}</td>`).join("")}
+      <td class="${status === "APROVADO" ? "ok status" : "bad status"}">${escaparHtml(status)}</td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><style>
+    @page { size: A4 landscape; margin: 8mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #10233f; font-family: Arial, sans-serif; font-size: 8px; }
+    .cabecalho { border: 1px solid #0b2855; margin-bottom: 6px; }
+    .topo { display: grid; grid-template-columns: 150px 1fr 160px; align-items: center; min-height: 48px; border-bottom: 1px solid #0b2855; }
+    .codigo { padding: 7px; line-height: 1.5; }
+    .titulo { color: #0b2855; font-size: 12px; font-weight: 700; text-align: center; }
+    .marca { padding-right: 10px; color: #0b2855; font-size: 20px; font-weight: 700; text-align: right; }
+    .marca span { color: #27d3ae; }
+    .meta { display: grid; grid-template-columns: repeat(4, 1fr); background: #ddf7f1; }
+    .meta div { padding: 5px 7px; border-right: 1px solid #0b2855; }
+    .meta div:last-child { border-right: 0; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; }
+    th, td { border: 1px solid #8aa2b8; padding: 3px 2px; text-align: center; vertical-align: middle; }
+    th { color: white; background: #0b2855; font-weight: 700; }
+    th.grupo { background: #147b82; }
+    tr.alt td { background: #f0fbf8; }
+    td.ok { color: #087f5b; background: #d7f5e9 !important; font-weight: 700; }
+    td.bad { color: #b42318; background: #fee4e2 !important; font-weight: 700; }
+    td.status { font-size: 7px; }
+    .legenda { margin-top: 5px; display: flex; justify-content: space-between; color: #52677d; font-size: 7px; }
+  </style></head><body>
+    <div class="cabecalho"><div class="topo">
+      <div class="codigo"><strong>REL 06GQ09</strong><br>Vers&atilde;o: 00<br>Per&iacute;odo: ${escaparHtml(periodoRelatorio)}</div>
+      <div class="titulo">AVALIA&Ccedil;&Atilde;O DOS CERTIFICADOS DE CALIBRA&Ccedil;&Atilde;O - TESTO 174T</div>
+      <div class="marca">Calibra<span>Flow</span></div>
+    </div><div class="meta">
+      <div><strong>Instrumento:</strong> TESTO</div><div><strong>Modelo:</strong> 174T</div>
+      <div><strong>DMA:</strong> ${numero(dma)} &deg;C</div><div><strong>Total:</strong> ${registros.length}</div>
+    </div></div>
+    <table><thead><tr>
+      <th rowspan="2">N&deg; S&eacute;rie</th><th rowspan="2">TAG</th><th rowspan="2">Calibrado em</th><th rowspan="2">Validade</th><th rowspan="2">Certificado</th><th rowspan="2">Incerteza (&plusmn;U)</th>
+      <th class="grupo" colspan="2">-20,0&deg;C</th><th class="grupo" colspan="2">0,0&deg;C</th><th class="grupo" colspan="2">15,0&deg;C</th><th class="grupo" colspan="2">60,0&deg;C</th><th rowspan="2">RESULTADO</th>
+    </tr><tr>${Array.from({ length: 4 }, () => "<th>Erro</th><th>Soma</th>").join("")}</tr></thead><tbody>${linhas}</tbody></table>
+    <div class="legenda"><span>Soma = |erro| + incerteza. Aprovado quando a soma &eacute; menor ou igual ao DMA.</span><span>CalibraFlow - Gest&atilde;o de Certificados</span></div>
+  </body></html>`;
+}
+
 function extrairMetadadosDoTexto(texto, nomeOriginal = "") {
   let dlt = "";
   let serie = "";
@@ -3202,10 +3290,18 @@ app.get("/relatorio-dia/html", async (req, res) => {
     );
 
     const todos = await r.json();
+    if (!r.ok) {
+      const erro = new Error(todos?.message || todos?.error || "Falha ao consultar certificados DLT.");
+      erro.statusCode = 502;
+      throw erro;
+    }
     const dados = Array.isArray(todos) ? todos : [];
+    if (dados.length === 0) {
+      return res.status(404).json({ erro: "Nenhum certificado DLT encontrado no periodo informado." });
+    }
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, periodoFormatado, criterios.limite_dlt);
+    const html = montarHtmlRelatorioPdfDLT(dados, periodoFormatado, criterios.limite_dlt);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
   } catch (e) {
@@ -3226,15 +3322,23 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
     );
 
     const todos = await r.json();
+    if (!r.ok) {
+      const erro = new Error(todos?.message || todos?.error || "Falha ao consultar certificados DLT.");
+      erro.statusCode = 502;
+      throw erro;
+    }
     const dados = Array.isArray(todos) ? todos : [];
+    if (dados.length === 0) {
+      return res.status(404).json({ erro: "Nenhum certificado DLT encontrado no periodo informado." });
+    }
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioDia(dados, periodoFormatado, criterios.limite_dlt);
+    const html = montarHtmlRelatorioPdfDLT(dados, periodoFormatado, criterios.limite_dlt);
     const nomeArquivo = `RELATORIO_174T_${sufixoArquivo}.pdf`;
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle" });
+    await page.setContent(html, { waitUntil: "load" });
 
     const pdfPath = path.join(os.tmpdir(), nomeArquivo);
 
