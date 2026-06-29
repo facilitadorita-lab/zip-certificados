@@ -13,10 +13,7 @@ import archiver from "archiver";
 import dns from "dns";
 import { createClient } from "@supabase/supabase-js";
 import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
-
-// Instala e usa o Chromium dentro do pacote, sem depender do cache do Render.
-process.env.PLAYWRIGHT_BROWSERS_PATH ||= "0";
-const { chromium } = await import("playwright");
+import { gerarPdfDLH } from "./relatorios-pdf.js";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -2610,21 +2607,7 @@ app.get("/dlh/status/google", async (req, res) => {
 });
 
 app.get("/dlh/status/pdf", (req, res) => {
-  try {
-    const navegadorInstalado = fs.existsSync(chromium.executablePath());
-    return res.status(navegadorInstalado ? 200 : 503).json({
-      ok: navegadorInstalado,
-      servico: "pdf",
-      navegador_instalado: navegadorInstalado
-    });
-  } catch (e) {
-    return res.status(503).json({
-      ok: false,
-      servico: "pdf",
-      navegador_instalado: false,
-      erro: "Navegador PDF indisponivel"
-    });
-  }
+  return res.json({ ok: true, servico: "pdf", motor: "pdfkit" });
 });
 
 app.get("/dlh/sync", async (req, res) => {
@@ -3163,7 +3146,6 @@ app.get("/dlh/relatorio-dia/dados", async (req, res) => {
 });
 
 app.get("/dlh/relatorio-dia/pdf", async (req, res) => {
-  let browser;
   try {
     const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
     const r = await fetch(
@@ -3182,7 +3164,7 @@ app.get("/dlh/relatorio-dia/pdf", async (req, res) => {
     }
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioPdfDLH(
+    const pdf = await gerarPdfDLH(
       dados,
       periodoFormatado,
       Number(criterios.limite_temperatura ?? 0.5),
@@ -3190,23 +3172,10 @@ app.get("/dlh/relatorio-dia/pdf", async (req, res) => {
     );
     const nomeArquivo = `RELATORIO_DLH_${sufixoArquivo}.pdf`;
 
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "load" });
-    const pdf = await page.pdf({
-      format: "A3",
-      landscape: true,
-      printBackground: true,
-      margin: { top: "7mm", right: "7mm", bottom: "7mm", left: "7mm" }
-    });
-    await browser.close();
-    browser = null;
-
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
     return res.send(pdf);
   } catch (e) {
-    if (browser) await browser.close();
     return res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });

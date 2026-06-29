@@ -12,10 +12,7 @@ import zlib from "zlib";
 import archiver from "archiver";
 import dns from "dns";
 import { createClient } from "@supabase/supabase-js";
-
-// Instala e usa o Chromium dentro do pacote, sem depender do cache do Render.
-process.env.PLAYWRIGHT_BROWSERS_PATH ||= "0";
-const { chromium } = await import("playwright");
+import { gerarPdfDLT } from "./relatorios-pdf.js";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -2661,21 +2658,7 @@ app.get("/status/google", async (req, res) => {
 });
 
 app.get("/status/pdf", (req, res) => {
-  try {
-    const navegadorInstalado = fs.existsSync(chromium.executablePath());
-    return res.status(navegadorInstalado ? 200 : 503).json({
-      ok: navegadorInstalado,
-      servico: "pdf",
-      navegador_instalado: navegadorInstalado
-    });
-  } catch (e) {
-    return res.status(503).json({
-      ok: false,
-      servico: "pdf",
-      navegador_instalado: false,
-      erro: "Navegador PDF indisponivel"
-    });
-  }
+  return res.json({ ok: true, servico: "pdf", motor: "pdfkit" });
 });
 
 app.get("/certificados", async (req, res) => {
@@ -3331,8 +3314,6 @@ app.get("/relatorio-dia/html", async (req, res) => {
 });
 
 app.get("/relatorio-dia/pdf", async (req, res) => {
-  let browser;
-
   try {
     const { dataInicio, dataFim, periodoFormatado, sufixoArquivo } = obterIntervaloRelatorio(req.query);
     const salvar = String(req.query.salvar || "0") === "1";
@@ -3354,33 +3335,14 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
     }
 
     const criterios = await buscarCriteriosCalibracao();
-    const html = montarHtmlRelatorioPdfDLT(dados, periodoFormatado, criterios.limite_dlt);
+    const buffer = await gerarPdfDLT(dados, periodoFormatado, criterios.limite_dlt);
     const nomeArquivo = `RELATORIO_174T_${sufixoArquivo}.pdf`;
 
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "load" });
-
-    const pdfPath = path.join(os.tmpdir(), nomeArquivo);
-
-    await page.pdf({
-      path: pdfPath,
-      format: "A4",
-      landscape: true,
-      printBackground: true,
-      margin: {
-        top: "8mm",
-        right: "8mm",
-        bottom: "8mm",
-        left: "8mm"
-      }
-    });
-
-    await browser.close();
-    browser = null;
-
     if (salvar) {
+      const pdfPath = path.join(os.tmpdir(), nomeArquivo);
+      fs.writeFileSync(pdfPath, buffer);
       const arquivoDrive = await salvarRelatorioNoDrive(pdfPath, nomeArquivo);
+      fs.unlinkSync(pdfPath);
 
       await fetch(`${SUPABASE_URL}/rest/v1/relatorios_diarios`, {
         method: "POST",
@@ -3395,16 +3357,10 @@ app.get("/relatorio-dia/pdf", async (req, res) => {
       });
     }
 
-    const buffer = fs.readFileSync(pdfPath);
-    fs.unlinkSync(pdfPath);
-
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${nomeArquivo}"`);
     return res.send(buffer);
   } catch (e) {
-    if (browser) {
-      await browser.close();
-    }
     res.status(e.statusCode || 500).json({ erro: e.message });
   }
 });

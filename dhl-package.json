@@ -1,13 +1,12 @@
 {
   "name": "dlh-backend",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "API de leitura e processamento de certificados DLH",
   "main": "server-dlh.js",
   "type": "module",
   "scripts": {
     "start": "node server-dlh.js",
-    "dev": "node --watch server-dlh.js",
-    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install --only-shell chromium"
+    "dev": "node --watch server-dlh.js"
   },
   "engines": {
     "node": ">=18"
@@ -20,7 +19,7 @@
     "googleapis": "^173.0.0",
     "node-fetch": "^3.3.2",
     "pdfjs-dist": "^4.10.38",
-    "playwright": "1.52.0",
+    "pdfkit": "0.15.0",
     "exceljs": "^4.4.0"
   }
 }
