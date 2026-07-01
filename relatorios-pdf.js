@@ -207,6 +207,11 @@ function criarDocumento(opcoes, montar) {
         align: "right",
         lineBreak: false
       });
+      documento.text("Calibra Flow - Gestão de Certificados", esquerda, topo + 40, {
+        width: largura,
+        align: "center",
+        lineBreak: false
+      });
       documento.page.margins.bottom = margemInferiorOriginal;
       documento.restore();
     }, resolve, reject);
@@ -225,7 +230,7 @@ export function gerarPdfDLT(registros, periodo, dma = 0.5) {
       y = desenharCabecalho(doc, {
         codigo: "REL 06GQ09",
         periodo,
-        titulo: "AVALIACAO DOS CERTIFICADOS DE CALIBRACAO - TESTO 174T",
+        titulo: "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174T",
         meta: ["Instrumento: TESTO", "Modelo: 174T", `DMA: ${numero(dma)} C`, `Total: ${registros.length}`]
       });
       const h = 16;
@@ -300,7 +305,7 @@ export function gerarPdfDLH(registros, periodo, limiteTemperatura = 0.5, limiteU
       y = desenharCabecalho(doc, {
         codigo: "REL 06GQ10",
         periodo,
-        titulo: "AVALIACAO DOS CERTIFICADOS DE CALIBRACAO - TESTO 174H",
+        titulo: "AVALIAÇÃO DOS CERTIFICADOS DE CALIBRAÇÃO - TESTO 174H",
         meta: ["Instrumento: TESTO", "Modelo: 174H", `DMA temperatura: ${numero(limiteTemperatura)} C`, `DMA umidade: ${numero(limiteUmidade)} %UR`, `Total: ${registros.length}`]
       });
       const h = 15;
