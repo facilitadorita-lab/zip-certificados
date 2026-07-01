@@ -1,4 +1,9 @@
 import PDFDocument from "pdfkit";
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
+
+const LOGO_ITAFRIA = fileURLToPath(new URL("./logo-itafria.png", import.meta.url));
+const RODAPE_ALTURA = 52;
 
 const CORES = {
   navy: "#0B2855",
@@ -119,9 +124,22 @@ function desenharCabecalho(doc, configuracao) {
   desenharCelula(doc, configuracao.titulo, x + codigoLargura, topo, largura - codigoLargura - marcaLargura, alturaTopo, {
     fontSize: 11, bold: true, color: CORES.navy, border: CORES.navy
   });
-  desenharCelula(doc, "CalibraFlow", x + largura - marcaLargura, topo, marcaLargura, alturaTopo, {
-    fontSize: 16, bold: true, color: CORES.navy, border: CORES.navy
-  });
+  const marcaX = x + largura - marcaLargura;
+  desenharCelula(doc, "", marcaX, topo, marcaLargura, alturaTopo, { border: CORES.navy });
+  if (existsSync(LOGO_ITAFRIA)) {
+    doc.image(LOGO_ITAFRIA, marcaX + 5, topo + 6, {
+      fit: [marcaLargura - 10, alturaTopo - 12],
+      align: "center",
+      valign: "center"
+    });
+  } else {
+    doc.fillColor(CORES.navy).font("Helvetica-Bold").fontSize(11);
+    doc.text("ITA FRIA", marcaX + 4, topo + 15, {
+      width: marcaLargura - 8,
+      align: "center",
+      lineBreak: false
+    });
+  }
 
   const metaY = topo + alturaTopo;
   const metaLargura = largura / configuracao.meta.length;
@@ -159,16 +177,44 @@ function criarDocumento(opcoes, montar) {
     doc.on("end", () => resolve(Buffer.concat(partes)));
     doc.on("error", reject);
     montar(doc, (documento, pagina, total) => {
-      const rodapeY = documento.page.height - documento.page.margins.bottom - 8;
+      const esquerda = documento.page.margins.left;
+      const direita = documento.page.width - documento.page.margins.right;
+      const largura = direita - esquerda;
+      const topo = documento.page.height - RODAPE_ALTURA;
+      const assinaturaX = esquerda;
+      const paginaLargura = 82;
+      const assinaturaLargura = Math.max(largura - paginaLargura - 20, 180);
+      const margemInferiorOriginal = documento.page.margins.bottom;
+
+      documento.save();
+      // O PDFKit tenta criar uma nova página ao escrever dentro da margem inferior.
+      // O conteúdo já respeitou a margem reservada; zeramos apenas durante o rodapé.
+      documento.page.margins.bottom = 0;
+      documento.lineWidth(0.6).strokeColor(CORES.border);
+      documento.moveTo(esquerda, topo).lineTo(direita, topo).stroke();
+
+      documento.fillColor(CORES.muted).font("Helvetica").fontSize(6.2);
+      documento.text("Responsável pela avaliação:", assinaturaX, topo + 7, {
+        width: assinaturaLargura,
+        lineBreak: false
+      });
+      documento.moveTo(assinaturaX, topo + 22).lineTo(assinaturaX + assinaturaLargura, topo + 22).stroke();
+      documento.text("Assinatura", assinaturaX, topo + 25, { width: assinaturaLargura, lineBreak: false });
+
       documento.fillColor(CORES.muted).font("Helvetica").fontSize(6);
-      documento.text("CalibraFlow - Gestao de Certificados", documento.page.margins.left, rodapeY, { lineBreak: false });
-      documento.text(`Pagina ${pagina} de ${total}`, documento.page.width - documento.page.margins.right - 70, rodapeY, { width: 70, align: "right", lineBreak: false });
+      documento.text(`Página ${pagina} de ${total}`, direita - paginaLargura, topo + 24, {
+        width: paginaLargura,
+        align: "right",
+        lineBreak: false
+      });
+      documento.page.margins.bottom = margemInferiorOriginal;
+      documento.restore();
     }, resolve, reject);
   });
 }
 
 export function gerarPdfDLT(registros, periodo, dma = 0.5) {
-  return criarDocumento({ size: "A4", layout: "landscape", margins: { top: 20, right: 20, bottom: 24, left: 20 }, title: "Relatorio DLT" }, (doc, rodape, resolve, reject) => {
+  return criarDocumento({ size: "A4", layout: "landscape", margins: { top: 20, right: 20, bottom: 60, left: 20 }, title: "Relatorio DLT" }, (doc, rodape, resolve, reject) => {
     const bases = [58, 42, 55, 48, 66, 45, 36, 40, 36, 40, 36, 40, 36, 40, 62];
     let larguras;
     let y;
@@ -243,7 +289,7 @@ export function gerarPdfDLT(registros, periodo, dma = 0.5) {
 }
 
 export function gerarPdfDLH(registros, periodo, limiteTemperatura = 0.5, limiteUmidade = 5) {
-  return criarDocumento({ size: "A3", layout: "landscape", margins: { top: 16, right: 16, bottom: 22, left: 16 }, title: "Relatorio DLH" }, (doc, rodape, resolve, reject) => {
+  return criarDocumento({ size: "A3", layout: "landscape", margins: { top: 16, right: 16, bottom: 60, left: 16 }, title: "Relatorio DLH" }, (doc, rodape, resolve, reject) => {
     const bases = [52, 36, 50, 42, 58, 36, 31, 33, 31, 33, 31, 33, 31, 33, 50, 30, 30, 33, 30, 30, 33, 30, 30, 33, 50, 50];
     let larguras;
     let y;
