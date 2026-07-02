@@ -2343,6 +2343,41 @@ app.get("/automacao/status", async (req, res) => {
   }
 });
 
+app.post("/automacao/alertas-vencimentos", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  try {
+    validarConfiguracaoBasica();
+    const janelaDias = Math.max(1, Math.min(Number(req.body?.janela_dias) || 60, 365));
+    const diasVencidos = Math.max(0, Math.min(Number(req.body?.dias_vencidos) || 30, 365));
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/listar_alertas_vencimentos`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        p_janela_dias: janelaDias,
+        p_dias_vencidos: diasVencidos
+      })
+    });
+    const data = await response.json();
+    const certificados = validarListaSupabase(response, data, "Supabase alertas de vencimento");
+
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      gerado_em: new Date().toISOString(),
+      janela_dias: janelaDias,
+      dias_vencidos: diasVencidos,
+      total: certificados.length,
+      vencidos: certificados.filter(item => Number(item.dias_restantes) < 0).length,
+      ate_30_dias: certificados.filter(item => Number(item.dias_restantes) >= 0 && Number(item.dias_restantes) <= 30).length,
+      de_31_a_60_dias: certificados.filter(item => Number(item.dias_restantes) >= 31 && Number(item.dias_restantes) <= 60).length,
+      certificados
+    });
+  } catch (e) {
+    console.error("Falha ao consultar alertas de vencimento:", e.message);
+    res.status(500).json({ erro: "Nao foi possivel consultar os alertas de vencimento" });
+  }
+});
+
 app.post("/automacao/sincronizar", async (req, res) => {
   if (!validarSegredoAutomacao(req, res)) return;
 
