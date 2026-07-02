@@ -2363,9 +2363,11 @@ app.post("/automacao/alertas-vencimentos", async (req, res) => {
 
     res.setHeader("Cache-Control", "no-store");
     res.json({
+      versao_regra: "2026-07-02.2",
+      regra: "certificado_mais_recente_por_equipamento",
       gerado_em: new Date().toISOString(),
       janela_dias: janelaDias,
-      dias_vencidos: diasVencidos,
+      todos_vencidos: true,
       total: certificados.length,
       vencidos: certificados.filter(item => Number(item.dias_restantes) < 0).length,
       ate_30_dias: certificados.filter(item => Number(item.dias_restantes) >= 0 && Number(item.dias_restantes) <= 30).length,
