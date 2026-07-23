@@ -254,6 +254,6 @@ export const MAPA_LOGGERS_DLH = {
 };
 
 export function normalizarDLH(valor) {
-  const num = String(valor || "").replace(/\D/g, "").padStart(4, "0");
-  return num ? `DLH-${num}` : "";
+  const bruto = String(valor ?? "").replace(/\D/g, "");
+  return bruto ? `DLH-${bruto.padStart(4, "0")}` : "";
 }

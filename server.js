@@ -872,10 +872,12 @@ function montarUrlCertificadosPorPeriodo({ tabela, campoEquipamento, equipamento
   const params = new URLSearchParams();
   params.set("select", CERTIFICADOS_LISTA_SELECT);
   params.set(campoEquipamento, `in.(${equipamentos.map(v => String(v).replace(/[()"]/g, "")).join(",")})`);
-  params.set("data", `lte.${testeFim}`);
-  params.set("vencimento", `gte.${testeInicio}`);
+  if (testeInicio && testeFim) {
+    params.set("data", `lte.${testeFim}`);
+    params.set("vencimento", `gte.${testeInicio}`);
+  }
   params.append("order", `${campoEquipamento}.asc`);
-  params.append("order", "data.asc");
+  params.append("order", "data.desc");
   params.append("order", "id.asc");
   return `${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`;
 }
@@ -889,7 +891,11 @@ async function buscarCertificadosPorPeriodoEmLotes({
 }) {
   validarConfiguracaoBasica();
 
-  if (testeInicio > testeFim) {
+  if ((testeInicio && !testeFim) || (!testeInicio && testeFim)) {
+    throw new Error("Informe data inicial e data final do teste, ou deixe as duas em branco");
+  }
+
+  if (testeInicio && testeFim && testeInicio > testeFim) {
     throw new Error("A data inicial do teste não pode ser posterior à data final");
   }
 
@@ -2704,7 +2710,7 @@ app.get("/certificados", async (req, res) => {
     const testeInicio = normalizarDataQuery(req.query.teste_inicio || req.query.data_inicio || req.query.inicio);
     const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
 
-    if (listaEquipamentos.length && testeInicio && testeFim) {
+    if (listaEquipamentos.length) {
       const data = await buscarCertificadosPorPeriodoEmLotes({
         tabela: "certificados",
         campoEquipamento: "dlt",
@@ -2712,7 +2718,12 @@ app.get("/certificados", async (req, res) => {
         testeInicio,
         testeFim
       });
-      return res.json({ total: data.length, registros: data });
+      return res.json({
+        total: data.length,
+        teste_inicio: testeInicio || null,
+        teste_fim: testeFim || null,
+        registros: data
+      });
     }
 
     const limit = Number(req.query.limit || 100);
@@ -2751,10 +2762,6 @@ app.post("/certificados/busca-lista", async (req, res) => {
         total_informado: unicos.length
       });
     }
-    if (!testeInicio || !testeFim) {
-      return res.status(400).json({ erro: "Informe teste_inicio e teste_fim" });
-    }
-
     const registros = await buscarCertificadosPorPeriodoEmLotes({
       tabela: "certificados",
       campoEquipamento: "dlt",
@@ -2765,8 +2772,8 @@ app.post("/certificados/busca-lista", async (req, res) => {
 
     res.setHeader("Cache-Control", "private, max-age=300");
     res.json({
-      teste_inicio: testeInicio,
-      teste_fim: testeFim,
+      teste_inicio: testeInicio || null,
+      teste_fim: testeFim || null,
       ...montarResultadoBuscaLista(registros, unicos, "dlt", normalizarDLT)
     });
   } catch (e) {
