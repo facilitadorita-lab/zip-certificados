@@ -709,6 +709,281 @@ function montarResultadoBuscaLista(registros, equipamentosInformados, campoEquip
   };
 }
 
+function hojeIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function adicionarDiasIso(dataIso, dias) {
+  const data = new Date(`${dataIso}T00:00:00.000Z`);
+  data.setUTCDate(data.getUTCDate() + Number(dias || 0));
+  return data.toISOString().slice(0, 10);
+}
+
+function limitarNumero(valor, padrao, minimo, maximo) {
+  const numero = Number(valor);
+  if (!Number.isFinite(numero)) return padrao;
+  return Math.min(maximo, Math.max(minimo, Math.trunc(numero)));
+}
+
+async function contarRegistrosSupabase(tabela, filtros = []) {
+  validarConfiguracaoBasica();
+  const params = new URLSearchParams();
+  params.set("select", "id");
+  for (const [chave, valor] of filtros) params.append(chave, valor);
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`, {
+    headers: {
+      ...supabaseHeaders(),
+      Prefer: "count=exact",
+      Range: "0-0"
+    }
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(
+      `Supabase ${tabela}: ${data.message || data.error || response.statusText} (HTTP ${response.status})`
+    );
+  }
+
+  return Number(response.headers.get("content-range")?.split("/")[1] || 0);
+}
+
+async function buscarRegistrosAssistente(tabela, select, filtros = [], opcoes = {}) {
+  validarConfiguracaoBasica();
+  const params = new URLSearchParams();
+  params.set("select", select);
+  for (const [chave, valor] of filtros) params.append(chave, valor);
+  if (opcoes.order) params.append("order", opcoes.order);
+  params.set("limit", String(limitarNumero(opcoes.limit, 100, 1, 1000)));
+  params.set("offset", String(limitarNumero(opcoes.offset, 0, 0, 100000)));
+
+  const headers = { ...supabaseHeaders() };
+  if (opcoes.count) headers.Prefer = "count=exact";
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?${params.toString()}`, {
+    headers
+  });
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, `Supabase ${tabela}`);
+  return {
+    total: opcoes.count
+      ? Number(response.headers.get("content-range")?.split("/")[1] || registros.length)
+      : registros.length,
+    registros
+  };
+}
+
+function explicarDivergenciaCertificadoDLH(certificado) {
+  const motivo = String(certificado.motivo_divergencia || "").trim();
+  const status = String(certificado.status || "").toUpperCase();
+  const serie = String(certificado.serie || "").trim();
+  const serieEsperada = String(certificado.serie_esperada || "").trim();
+  const vencimento = String(certificado.vencimento || "").slice(0, 10);
+  const vencido = Boolean(vencimento && vencimento < hojeIso());
+
+  if (status === "REPROVADO") {
+    return {
+      tipo: "certificado_reprovado",
+      severidade: "alta",
+      resumo: "Certificado reprovado nos criterios de aceitacao.",
+      detalhe: "Ha ponto de temperatura ou umidade fora do limite configurado.",
+      acao_recomendada: "Bloquear uso do logger neste ensaio e solicitar avaliacao da empresa de calibracao.",
+      encaminhar_calibracao: true
+    };
+  }
+
+  if (status === "ERRO") {
+    return {
+      tipo: "erro_processamento",
+      severidade: "alta",
+      resumo: "O backend nao conseguiu interpretar o certificado com seguranca.",
+      detalhe: motivo || "O arquivo pode estar fora do padrao esperado, protegido ou incompleto.",
+      acao_recomendada: "Conferir o PDF original e solicitar reemissao caso o documento esteja fora do padrao.",
+      encaminhar_calibracao: true
+    };
+  }
+
+  if (certificado.duplicado) {
+    return {
+      tipo: "certificado_duplicado",
+      severidade: "media",
+      resumo: "Existe indicio de certificado duplicado para o mesmo DLH.",
+      detalhe: motivo || "Pode haver mais de um arquivo representando o mesmo certificado.",
+      acao_recomendada: "Manter apenas o registro correto e revisar o historico antes de emitir relatorio.",
+      encaminhar_calibracao: false
+    };
+  }
+
+  if (certificado.divergente && serie && serieEsperada && serie !== serieEsperada) {
+    return {
+      tipo: "serie_divergente",
+      severidade: "media",
+      resumo: "A serie extraida do certificado nao bate com a serie esperada para o logger.",
+      detalhe: `Serie no certificado: ${serie}. Serie esperada: ${serieEsperada}.`,
+      acao_recomendada: "Confirmar se o certificado pertence ao equipamento correto antes de aprovar.",
+      encaminhar_calibracao: true
+    };
+  }
+
+  if (certificado.divergente || motivo) {
+    return {
+      tipo: "divergencia",
+      severidade: "media",
+      resumo: "Existe uma divergencia cadastrada para este certificado.",
+      detalhe: motivo || "Divergencia sem motivo detalhado registrado.",
+      acao_recomendada: "Abrir o certificado e validar os dados principais antes de liberar para uso.",
+      encaminhar_calibracao: true
+    };
+  }
+
+  if (vencido) {
+    return {
+      tipo: "vencido",
+      severidade: "alta",
+      resumo: "O certificado esta vencido.",
+      detalhe: `Vencimento registrado: ${vencimento}.`,
+      acao_recomendada: "Remover o logger da selecao de ensaio ate existir certificado vigente.",
+      encaminhar_calibracao: false
+    };
+  }
+
+  return {
+    tipo: "sem_divergencia",
+    severidade: "baixa",
+    resumo: "Nao foi identificada divergencia automatica relevante.",
+    detalhe: "O certificado passou pelas regras conhecidas do backend.",
+    acao_recomendada: "Manter rastreabilidade normal.",
+    encaminhar_calibracao: false
+  };
+}
+
+function resumirCertificadosAssistente(registros) {
+  const hoje = hojeIso();
+  const em30 = adicionarDiasIso(hoje, 30);
+  const em60 = adicionarDiasIso(hoje, 60);
+  const total = registros.length;
+  const aprovados = registros.filter(c => String(c.status || "").toUpperCase() === "APROVADO").length;
+  const reprovados = registros.filter(c => String(c.status || "").toUpperCase() === "REPROVADO").length;
+  const erros = registros.filter(c => String(c.status || "").toUpperCase() === "ERRO").length;
+  const divergentes = registros.filter(c => c.divergente || c.duplicado || c.motivo_divergencia).length;
+  const vencidos = registros.filter(c => c.vencimento && String(c.vencimento).slice(0, 10) < hoje).length;
+  const vence30 = registros.filter(c => {
+    const vencimento = String(c.vencimento || "").slice(0, 10);
+    return vencimento >= hoje && vencimento <= em30;
+  }).length;
+  const vence60 = registros.filter(c => {
+    const vencimento = String(c.vencimento || "").slice(0, 10);
+    return vencimento > em30 && vencimento <= em60;
+  }).length;
+
+  return { total, aprovados, reprovados, erros, divergentes, vencidos, vence30, vence60 };
+}
+
+async function montarResumoModuloDLH() {
+  const hoje = hojeIso();
+  const em30 = adicionarDiasIso(hoje, 30);
+  const em60 = adicionarDiasIso(hoje, 60);
+  const [
+    total,
+    aprovados,
+    reprovados,
+    erros,
+    divergentes,
+    vencidos,
+    vence30,
+    vence60
+  ] = await Promise.all([
+    contarRegistrosSupabase("certificados_dlh"),
+    contarRegistrosSupabase("certificados_dlh", [["status", "eq.APROVADO"]]),
+    contarRegistrosSupabase("certificados_dlh", [["status", "eq.REPROVADO"]]),
+    contarRegistrosSupabase("certificados_dlh", [["status", "eq.ERRO"]]),
+    contarRegistrosSupabase("certificados_dlh", [["or", "(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null)"]]),
+    contarRegistrosSupabase("certificados_dlh", [["vencimento", `lt.${hoje}`]]),
+    contarRegistrosSupabase("certificados_dlh", [["vencimento", `gte.${hoje}`], ["vencimento", `lte.${em30}`]]),
+    contarRegistrosSupabase("certificados_dlh", [["vencimento", `gt.${em30}`], ["vencimento", `lte.${em60}`]])
+  ]);
+
+  return {
+    modulo: "DLH",
+    gerado_em: new Date().toISOString(),
+    total,
+    aprovados,
+    reprovados,
+    erros,
+    divergentes,
+    vencidos,
+    ate_30_dias: vence30,
+    de_31_a_60_dias: vence60
+  };
+}
+
+function montarRiscosAssistente(resumo) {
+  const riscos = [];
+  if (resumo.vencidos > 0) {
+    riscos.push({
+      prioridade: "alta",
+      titulo: "Certificados vencidos",
+      detalhe: `${resumo.vencidos} certificado(s) vencido(s) podem bloquear auditoria ou uso em teste.`,
+      acao: "Recalibrar ou substituir os loggers antes de novos ensaios."
+    });
+  }
+  if (resumo.reprovados > 0 || resumo.erros > 0) {
+    riscos.push({
+      prioridade: "alta",
+      titulo: "Certificados reprovados ou com erro",
+      detalhe: `${resumo.reprovados} reprovado(s) e ${resumo.erros} com erro de leitura.`,
+      acao: "Encaminhar para avaliacao da empresa de calibracao."
+    });
+  }
+  if (resumo.divergentes > 0) {
+    riscos.push({
+      prioridade: "media",
+      titulo: "Divergencias de rastreabilidade",
+      detalhe: `${resumo.divergentes} certificado(s) com divergencia de dados ou duplicidade.`,
+      acao: "Conferir serie, TAG e numero do certificado antes de liberar relatorios."
+    });
+  }
+  if (resumo.ate_30_dias > 0) {
+    riscos.push({
+      prioridade: "media",
+      titulo: "Vencimentos proximos",
+      detalhe: `${resumo.ate_30_dias} certificado(s) vencem em ate 30 dias.`,
+      acao: "Planejar calibracao para evitar parada operacional."
+    });
+  }
+  if (!riscos.length) {
+    riscos.push({
+      prioridade: "baixa",
+      titulo: "Sem risco critico identificado",
+      detalhe: "Nao ha vencidos, reprovados ou divergencias relevantes no resumo atual.",
+      acao: "Manter monitoramento semanal."
+    });
+  }
+  return riscos;
+}
+
+function montarMensagemExecutiva(resumo, riscos) {
+  const principal = riscos[0];
+  return {
+    titulo: "Resumo executivo DLH",
+    resumo: `Base DLH com ${resumo.total} certificado(s), ${resumo.vencidos} vencido(s), ${resumo.divergentes} divergente(s) e ${resumo.reprovados} reprovado(s).`,
+    leitura_gerencial: principal?.prioridade === "baixa"
+      ? "A operacao esta controlada no momento."
+      : `Atencao para ${principal.titulo.toLowerCase()}: ${principal.detalhe}`,
+    proxima_acao: principal?.acao || "Manter rotina de acompanhamento."
+  };
+}
+
+async function buscarCertificadoAssistenteDLH(id) {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?id=eq.${encodeURIComponent(id)}&select=${CERTIFICADOS_DLH_LISTA_SELECT},pontos_umidade,pontos_temperatura&limit=1`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, "Supabase certificado DLH");
+  return registros[0] || null;
+}
+
 async function buscarCertificadosPorIdsEmLotes(tabela, campos, ids) {
   validarConfiguracaoBasica();
   const resultados = [];
@@ -2767,6 +3042,225 @@ app.get("/dlh/divergentes", async (req, res) => {
       limit,
       offset,
       registros: Array.isArray(data) ? data : []
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/resumo", async (_req, res) => {
+  try {
+    const resumo = await montarResumoModuloDLH();
+    const riscos = montarRiscosAssistente(resumo);
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      ...resumo,
+      riscos,
+      executivo: montarMensagemExecutiva(resumo, riscos)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/riscos", async (_req, res) => {
+  try {
+    const resumo = await montarResumoModuloDLH();
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      modulo: "DLH",
+      gerado_em: resumo.gerado_em,
+      riscos: montarRiscosAssistente(resumo)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/divergencias", async (req, res) => {
+  try {
+    const limit = limitarNumero(req.query.limit, 50, 1, 200);
+    const offset = limitarNumero(req.query.offset, 0, 0, 100000);
+    const { total, registros } = await buscarRegistrosAssistente(
+      "certificados_dlh",
+      CERTIFICADOS_DLH_LISTA_SELECT,
+      [["or", "(divergente.eq.true,duplicado.eq.true,motivo_divergencia.not.is.null,status.eq.REPROVADO,status.eq.ERRO)"]],
+      { order: "criado_em.desc", limit, offset, count: true }
+    );
+
+    res.setHeader("Cache-Control", "private, max-age=120");
+    res.json({
+      modulo: "DLH",
+      total,
+      limit,
+      offset,
+      registros: registros.map(item => ({
+        ...item,
+        analise: explicarDivergenciaCertificadoDLH(item)
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/resumo-lote", async (req, res) => {
+  try {
+    const equipamentos = normalizarListaQuery(req.query.equipamentos || req.query.dlh || req.query.lista);
+    const testeInicio = normalizarDataQuery(req.query.teste_inicio || req.query.data_inicio || req.query.inicio);
+    const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
+    const unicos = [...new Set(equipamentos.map(normalizarDLH).filter(Boolean))];
+
+    if (!unicos.length) {
+      return res.status(400).json({ erro: "Informe ao menos um equipamento DLH" });
+    }
+    if (unicos.length > 500) {
+      return res.status(400).json({ erro: "O limite e de 500 equipamentos por resumo", total_informado: unicos.length });
+    }
+
+    const registros = await buscarCertificadosPorPeriodoEmLotes({
+      tabela: "certificados_dlh",
+      campoEquipamento: "dlh",
+      equipamentos: unicos,
+      testeInicio,
+      testeFim
+    });
+    const resumo = resumirCertificadosAssistente(registros);
+    const riscos = montarRiscosAssistente({ ...resumo, modulo: "DLH" });
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      modulo: "DLH",
+      teste_inicio: testeInicio || null,
+      teste_fim: testeFim || null,
+      equipamentos: unicos.length,
+      ...montarResultadoBuscaLista(registros, unicos, "dlh", normalizarDLH),
+      resumo,
+      riscos,
+      executivo: montarMensagemExecutiva({ ...resumo, modulo: "DLH" }, riscos)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/conferencia-relatorio", async (req, res) => {
+  try {
+    const dataInicio = normalizarDataQuery(req.query.data_inicio || req.query.inicio);
+    const dataFim = normalizarDataQuery(req.query.data_fim || req.query.fim);
+    if ((dataInicio && !dataFim) || (!dataInicio && dataFim)) {
+      return res.status(400).json({ erro: "Informe data inicial e final, ou deixe ambas em branco" });
+    }
+    if (dataInicio && dataFim && dataInicio > dataFim) {
+      return res.status(400).json({ erro: "A data inicial nao pode ser posterior a data final" });
+    }
+
+    const filtros = [];
+    if (dataInicio) filtros.push(["data", `gte.${dataInicio}`], ["data", `lte.${dataFim}`]);
+    const { total, registros } = await buscarRegistrosAssistente(
+      "certificados_dlh",
+      CERTIFICADOS_DLH_LISTA_SELECT,
+      filtros,
+      { order: "data.desc", limit: limitarNumero(req.query.limit, 1000, 1, 1000), count: true }
+    );
+    const resumo = resumirCertificadosAssistente(registros);
+    const bloqueios = registros
+      .map(item => ({ item, analise: explicarDivergenciaCertificadoDLH(item) }))
+      .filter(item => ["alta", "media"].includes(item.analise.severidade));
+
+    res.setHeader("Cache-Control", "private, max-age=120");
+    res.json({
+      modulo: "DLH",
+      total_periodo: total,
+      avaliados_na_amostra: registros.length,
+      data_inicio: dataInicio || null,
+      data_fim: dataFim || null,
+      pronto_para_emitir: bloqueios.length === 0,
+      resumo,
+      bloqueios: bloqueios.slice(0, 200)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/assistente/relatorio-executivo", async (_req, res) => {
+  try {
+    const resumo = await montarResumoModuloDLH();
+    const riscos = montarRiscosAssistente(resumo);
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      modulo: "DLH",
+      gerado_em: resumo.gerado_em,
+      resumo,
+      riscos,
+      executivo: montarMensagemExecutiva(resumo, riscos)
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/dlh/assistente/chamado-calibracao", async (req, res) => {
+  try {
+    const id = req.body?.id;
+    if (!id) return res.status(400).json({ erro: "Informe o id do certificado" });
+    const certificado = await buscarCertificadoAssistenteDLH(id);
+    if (!certificado) return res.status(404).json({ erro: "Certificado DLH nao encontrado" });
+
+    const analise = explicarDivergenciaCertificadoDLH(certificado);
+    const assunto = `Divergencia certificado DLH ${certificado.dlh || ""} - ${certificado.certificado || ""}`.trim();
+    const corpo =
+      `Prezados,\n\n` +
+      `Solicitamos apoio na avaliacao do certificado abaixo:\n\n` +
+      `Modulo: DLH\n` +
+      `Logger: ${certificado.dlh || "-"}\n` +
+      `Serie: ${certificado.serie || "-"}\n` +
+      `Serie esperada: ${certificado.serie_esperada || "-"}\n` +
+      `Certificado: ${certificado.certificado || "-"}\n` +
+      `Status: ${certificado.status || "-"}\n` +
+      `Motivo: ${certificado.motivo_divergencia || analise.resumo}\n\n` +
+      `Analise automatica: ${analise.detalhe}\n` +
+      `Acao recomendada: ${analise.acao_recomendada}\n\n` +
+      `Atenciosamente,\nCalibraFlow`;
+
+    res.json({
+      modulo: "DLH",
+      modo: "rascunho",
+      certificado,
+      analise,
+      chamado: {
+        para: req.body?.destinatario || process.env.CALIBRACAO_EMAIL || "",
+        assunto,
+        corpo
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/dlh/assistente/perguntar", async (req, res) => {
+  try {
+    const pergunta = String(req.body?.pergunta || req.body?.mensagem || "").trim();
+    const lista = normalizarListaQuery(pergunta).map(normalizarDLH).filter(Boolean);
+    const resumo = await montarResumoModuloDLH();
+    const riscos = montarRiscosAssistente(resumo);
+
+    if (lista.length) {
+      return res.json({
+        tipo: "busca_equipamentos",
+        resposta: `Encontrei ${lista.length} codigo(s) de logger na pergunta. Use a busca por lista para trazer todos os certificados relacionados.`,
+        filtros_sugeridos: { dlh: lista },
+        endpoint_sugerido: `/dlh/certificados?equipamentos=${lista.join(",")}`
+      });
+    }
+
+    res.json({
+      tipo: "resumo_operacional",
+      resposta: montarMensagemExecutiva(resumo, riscos).leitura_gerencial,
+      resumo,
+      riscos
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
