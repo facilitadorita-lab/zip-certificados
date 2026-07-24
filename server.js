@@ -86,6 +86,7 @@ const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const INVITE_REDIRECT_URL = process.env.INVITE_REDIRECT_URL || "";
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
+const BACKEND_VERSION = "assistente-backend-2026-07-23";
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -380,6 +381,7 @@ app.use(async (req, res, next) => {
     !AUTH_ENABLED ||
     req.method === "OPTIONS" ||
     req.path === "/" ||
+    req.path === "/versao" ||
     req.path.startsWith("/automacao/") ||
     possuiTicketDownload
   ) {
@@ -2527,6 +2529,28 @@ async function executarSyncEmBackground() {
 // =========================
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
+});
+
+app.get("/versao", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    modulo: "DLT",
+    versao: BACKEND_VERSION,
+    commit_render: process.env.RENDER_GIT_COMMIT || null,
+    servico_render: process.env.RENDER_SERVICE_NAME || null,
+    verificado_em: new Date().toISOString(),
+    rotas_assistente: [
+      "/assistente/resumo",
+      "/assistente/riscos",
+      "/assistente/divergencias",
+      "/assistente/resumo-lote",
+      "/assistente/conferencia-relatorio",
+      "/assistente/relatorio-executivo",
+      "/assistente/chamado-calibracao",
+      "/assistente/perguntar"
+    ]
+  });
 });
 
 app.get("/auth/me", (req, res) => {

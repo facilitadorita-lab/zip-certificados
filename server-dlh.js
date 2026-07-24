@@ -92,6 +92,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
+const BACKEND_VERSION = "assistente-backend-2026-07-23";
 const CERTIFICADOS_DLH_LISTA_SELECT = [
   "id", "nome_original", "nome_download", "dlh", "serie", "data",
   "certificado", "status", "validade", "vencimento", "mes_ano_validade",
@@ -367,6 +368,7 @@ app.use(async (req, res, next) => {
     !AUTH_ENABLED ||
     req.method === "OPTIONS" ||
     req.path === "/" ||
+    req.path === "/dlh/versao" ||
     req.path.startsWith("/dlh/automacao/") ||
     possuiTicketDownload
   ) {
@@ -2630,6 +2632,28 @@ app.get("/", (req, res) => {
   res.send("API DLH OK 🚀");
 });
 
+
+app.get("/dlh/versao", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    modulo: "DLH",
+    versao: BACKEND_VERSION,
+    commit_render: process.env.RENDER_GIT_COMMIT || null,
+    servico_render: process.env.RENDER_SERVICE_NAME || null,
+    verificado_em: new Date().toISOString(),
+    rotas_assistente: [
+      "/dlh/assistente/resumo",
+      "/dlh/assistente/riscos",
+      "/dlh/assistente/divergencias",
+      "/dlh/assistente/resumo-lote",
+      "/dlh/assistente/conferencia-relatorio",
+      "/dlh/assistente/relatorio-executivo",
+      "/dlh/assistente/chamado-calibracao",
+      "/dlh/assistente/perguntar"
+    ]
+  });
+});
 
 app.get("/dlh/criterios", async (req, res) => {
   try {
