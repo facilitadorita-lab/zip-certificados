@@ -1219,6 +1219,183 @@ async function buscarCertificadoAssistente(id) {
   return registros[0] || null;
 }
 
+function normalizarTextoOperacional(valor) {
+  return String(valor || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function codigoCurtoLogger(codigo) {
+  const digitos = String(codigo || "").replace(/\D/g, "");
+  return digitos ? digitos.padStart(4, "0") : "";
+}
+
+function sanitizarValorIn(valor) {
+  return String(valor || "").replace(/[()"]/g, "");
+}
+
+function localEhAreaTecnica(local) {
+  const texto = normalizarTextoOperacional(local);
+  return !texto || texto.includes("area tecnica") || texto.includes("conferido") || texto === "disponivel";
+}
+
+function localEhCliente(local) {
+  return normalizarTextoOperacional(local).includes("cliente");
+}
+
+function localEhManutencao(local) {
+  const texto = normalizarTextoOperacional(local);
+  return texto.includes("manut") || texto.includes("calib");
+}
+
+function montarBaseLoggersDLT() {
+  return Object.entries(MAPA_LOGGERS).map(([codigo, serie]) => ({
+    modulo: "DLT",
+    logger_codigo: normalizarDLT(codigo),
+    logger: codigoCurtoLogger(codigo),
+    serie_esperada: serie
+  }));
+}
+
+async function buscarStatusAtualDLT(codigos = []) {
+  const params = new URLSearchParams();
+  params.set(
+    "select",
+    "modulo,logger_codigo,local_atual,cliente,responsavel,observacao,data_movimentacao,ultima_movimentacao_id,usuario_email,atualizado_em"
+  );
+  params.set("modulo", "eq.DLT");
+  params.append("order", "data_movimentacao.desc");
+  params.set("limit", "10000");
+  if (codigos.length) {
+    const variantes = new Set();
+    for (const codigo of codigos) {
+      const normalizado = normalizarDLT(codigo);
+      if (normalizado) variantes.add(normalizado);
+      const curto = codigoCurtoLogger(codigo);
+      if (curto) variantes.add(curto);
+    }
+    params.set("logger_codigo", `in.(${[...variantes].map(sanitizarValorIn).join(",")})`);
+  }
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/logger_status_atual?${params.toString()}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json().catch(() => []);
+  if (!response.ok) {
+    return {
+      registros: [],
+      aviso: "Tabela logger_status_atual indisponivel; disponibilidade assumida como Area Tecnica."
+    };
+  }
+  return { registros: Array.isArray(data) ? data : [], aviso: null };
+}
+
+function combinarDisponibilidadeDLT(statusRegistros, opcoes = {}) {
+  const statusPorLogger = new Map();
+  for (const item of statusRegistros) {
+    const chave = normalizarDLT(item.logger_codigo);
+    if (chave && !statusPorLogger.has(chave)) statusPorLogger.set(chave, item);
+  }
+
+  const base = montarBaseLoggersDLT().map(item => {
+    const status = statusPorLogger.get(item.logger_codigo) || {};
+    const localAtual = status.local_atual || "Conferido - Area Tecnica";
+    return {
+      ...item,
+      local_atual: localAtual,
+      cliente: status.cliente || null,
+      responsavel: status.responsavel || null,
+      observacao: status.observacao || null,
+      data_movimentacao: status.data_movimentacao || null,
+      ultima_movimentacao_id: status.ultima_movimentacao_id || null,
+      fora_empresa: !localEhAreaTecnica(localAtual),
+      em_cliente: localEhCliente(localAtual),
+      manutencao_calibracao: localEhManutencao(localAtual)
+    };
+  });
+
+  const busca = normalizarTextoOperacional(opcoes.busca);
+  const lista = new Set((opcoes.lista || []).map(normalizarDLT).filter(Boolean));
+  const localFiltro = normalizarTextoOperacional(opcoes.local);
+
+  const filtrados = base.filter(item => {
+    if (lista.size && !lista.has(item.logger_codigo)) return false;
+    if (localFiltro && localFiltro !== "todos" && !normalizarTextoOperacional(item.local_atual).includes(localFiltro)) {
+      return false;
+    }
+    if (!busca) return true;
+    return [
+      item.logger_codigo,
+      item.logger,
+      item.serie_esperada,
+      item.local_atual,
+      item.cliente,
+      item.responsavel
+    ].some(valor => normalizarTextoOperacional(valor).includes(busca));
+  });
+
+  const resumoBase = lista.size || busca || localFiltro ? filtrados : base;
+  const clientes = new Set(resumoBase.filter(item => item.em_cliente && item.cliente).map(item => item.cliente));
+  const resumo = {
+    total: resumoBase.length,
+    area_tecnica: resumoBase.filter(item => localEhAreaTecnica(item.local_atual)).length,
+    em_cliente: resumoBase.filter(item => item.em_cliente).length,
+    manutencao_calibracao: resumoBase.filter(item => item.manutencao_calibracao).length,
+    fora_empresa: resumoBase.filter(item => item.fora_empresa).length,
+    clientes: clientes.size
+  };
+
+  return { resumo, registros: filtrados };
+}
+
+function avaliarChecklistPreTesteDLT({ equipamento, disponibilidade, certificados, testeInicio, testeFim }) {
+  const problemas = [];
+  const avisos = [];
+  const certificadosOrdenados = certificados
+    .slice()
+    .sort((a, b) => String(b.data || "").localeCompare(String(a.data || "")));
+
+  if (!disponibilidade) {
+    problemas.push("Logger nao cadastrado no mapa DLT.");
+  } else if (!localEhAreaTecnica(disponibilidade.local_atual)) {
+    problemas.push(`Logger fora da Area Tecnica: ${disponibilidade.local_atual}.`);
+  }
+
+  if (!certificadosOrdenados.length) {
+    problemas.push("Nenhum certificado encontrado para o periodo informado.");
+  }
+
+  const bloqueados = certificadosOrdenados.filter(c =>
+    ["REPROVADO", "ERRO"].includes(String(c.status || "").toUpperCase()) ||
+    c.divergente ||
+    c.motivo_divergencia
+  );
+  if (bloqueados.length) {
+    problemas.push(`${bloqueados.length} certificado(s) com reprovacao, erro ou divergencia.`);
+  }
+
+  if (certificadosOrdenados.length > 1) {
+    avisos.push("Ha mais de um certificado cobrindo o periodo; manter todos no dossie para rastreabilidade.");
+  }
+
+  return {
+    equipamento,
+    logger: codigoCurtoLogger(equipamento),
+    local_atual: disponibilidade?.local_atual || "Nao cadastrado",
+    cliente: disponibilidade?.cliente || null,
+    certificados_encontrados: certificadosOrdenados.length,
+    certificado_mais_recente: certificadosOrdenados[0] || null,
+    certificados: certificadosOrdenados.slice(0, 20),
+    teste_inicio: testeInicio || null,
+    teste_fim: testeFim || null,
+    pronto: problemas.length === 0,
+    problemas,
+    avisos
+  };
+}
+
 async function buscarCertificadosPorIdsEmLotes(tabela, campos, ids) {
   validarConfiguracaoBasica();
   const resultados = [];
@@ -2548,7 +2725,9 @@ app.get("/versao", (_req, res) => {
       "/assistente/conferencia-relatorio",
       "/assistente/relatorio-executivo",
       "/assistente/chamado-calibracao",
-      "/assistente/perguntar"
+      "/assistente/perguntar",
+      "/loggers/disponibilidade",
+      "/loggers/checklist-pre-teste"
     ]
   });
 });
@@ -3333,6 +3512,105 @@ app.post("/assistente/perguntar", async (req, res) => {
       resposta: montarMensagemExecutiva(resumo, riscos).leitura_gerencial,
       resumo,
       riscos
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/loggers/disponibilidade", async (req, res) => {
+  try {
+    const lista = normalizarListaQuery(req.query.lista || req.query.equipamentos || req.query.dlt);
+    const limit = limitarNumero(req.query.limit, 100, 1, 500);
+    const offset = limitarNumero(req.query.offset, 0, 0, 100000);
+    const status = await buscarStatusAtualDLT(lista);
+    const combinado = combinarDisponibilidadeDLT(status.registros, {
+      busca: req.query.busca,
+      local: req.query.local,
+      lista
+    });
+    const registros = combinado.registros.slice(offset, offset + limit);
+
+    res.setHeader("Cache-Control", "private, max-age=120");
+    res.json({
+      modulo: "DLT",
+      aviso: status.aviso,
+      resumo: combinado.resumo,
+      total: combinado.registros.length,
+      limit,
+      offset,
+      registros
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.post("/loggers/checklist-pre-teste", async (req, res) => {
+  try {
+    const equipamentos = Array.isArray(req.body?.equipamentos)
+      ? req.body.equipamentos.map(String).filter(Boolean)
+      : normalizarListaQuery(req.body?.equipamentos || req.body?.lista || req.body?.dlt);
+    const testeInicio = normalizarDataQuery(req.body?.teste_inicio || req.body?.data_inicio || req.body?.inicio);
+    const testeFim = normalizarDataQuery(req.body?.teste_fim || req.body?.data_fim || req.body?.fim);
+    const unicos = [...new Set(equipamentos.map(normalizarDLT).filter(Boolean))];
+
+    if (!unicos.length) {
+      return res.status(400).json({ erro: "Informe ao menos um equipamento DLT" });
+    }
+    if (unicos.length > 500) {
+      return res.status(400).json({ erro: "O limite e de 500 equipamentos por checklist", total_informado: unicos.length });
+    }
+    if (!testeInicio || !testeFim) {
+      return res.status(400).json({ erro: "Informe data inicial e final do teste" });
+    }
+
+    const [status, certificados] = await Promise.all([
+      buscarStatusAtualDLT(unicos),
+      buscarCertificadosPorPeriodoEmLotes({
+        tabela: "certificados",
+        campoEquipamento: "dlt",
+        equipamentos: unicos,
+        testeInicio,
+        testeFim
+      })
+    ]);
+    const disponibilidade = combinarDisponibilidadeDLT(status.registros, { lista: unicos }).registros;
+    const disponibilidadePorLogger = new Map(disponibilidade.map(item => [item.logger_codigo, item]));
+    const certificadosPorLogger = new Map();
+    for (const certificado of certificados) {
+      const chave = normalizarDLT(certificado.dlt);
+      if (!chave) continue;
+      const listaCertificados = certificadosPorLogger.get(chave) || [];
+      listaCertificados.push(certificado);
+      certificadosPorLogger.set(chave, listaCertificados);
+    }
+
+    const itens = unicos.map(equipamento => avaliarChecklistPreTesteDLT({
+      equipamento,
+      disponibilidade: disponibilidadePorLogger.get(equipamento),
+      certificados: certificadosPorLogger.get(equipamento) || [],
+      testeInicio,
+      testeFim
+    }));
+    const resumo = {
+      total_loggers: itens.length,
+      prontos: itens.filter(item => item.pronto).length,
+      bloqueados: itens.filter(item => !item.pronto).length,
+      fora_area_tecnica: itens.filter(item => !localEhAreaTecnica(item.local_atual)).length,
+      sem_certificado_periodo: itens.filter(item => item.certificados_encontrados === 0).length,
+      com_divergencia: itens.filter(item => item.problemas.some(p => p.includes("divergencia") || p.includes("reprovacao") || p.includes("erro"))).length
+    };
+
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.json({
+      modulo: "DLT",
+      aviso: status.aviso,
+      teste_inicio: testeInicio,
+      teste_fim: testeFim,
+      pronto_para_teste: resumo.bloqueados === 0,
+      resumo,
+      itens
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
