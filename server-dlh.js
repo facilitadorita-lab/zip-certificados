@@ -93,6 +93,12 @@ const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
 const BACKEND_VERSION = "assistente-backend-2026-07-23";
+const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
+const SUPPORT_FROM_EMAIL =
+  process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
+const SUPPORT_RESEND_API_KEY = process.env.SUPPORT_RESEND_API_KEY || process.env.RESEND_API_KEY || "";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 const CERTIFICADOS_DLH_LISTA_SELECT = [
   "id", "nome_original", "nome_download", "dlh", "serie", "data",
   "certificado", "status", "validade", "vencimento", "mes_ano_validade",
@@ -250,6 +256,214 @@ function supabaseHeaders() {
   return headers;
 }
 
+function escaparHtmlSuporte(valor) {
+  return String(valor ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function limitarTextoSuporte(valor, max = 2000) {
+  return String(valor ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim()
+    .slice(0, max);
+}
+
+function gerarTicketIdSuporte(modulo) {
+  const agora = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  return `TKT-${modulo}-${agora}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+}
+
+function montarTicketSuporte(req, modulo) {
+  const mensagem = limitarTextoSuporte(req.body?.mensagem, 5000);
+  if (!mensagem) {
+    const erro = new Error("Informe a mensagem do chamado");
+    erro.statusCode = 400;
+    throw erro;
+  }
+
+  const assunto = limitarTextoSuporte(req.body?.assunto, 160) || "Solicitacao de suporte";
+  const categoria = limitarTextoSuporte(req.body?.categoria, 80) || "Suporte";
+  const prioridade = limitarTextoSuporte(req.body?.prioridade, 40) || "Normal";
+  const pagina = limitarTextoSuporte(req.body?.pagina, 300);
+  const navegador = limitarTextoSuporte(req.headers["user-agent"], 500);
+  const ip = limitarTextoSuporte(String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0], 80);
+
+  return {
+    id: gerarTicketIdSuporte(modulo),
+    modulo,
+    assunto,
+    categoria,
+    prioridade,
+    mensagem,
+    pagina,
+    navegador,
+    ip,
+    criado_em: new Date().toISOString(),
+    usuario: {
+      id: req.auth?.user?.id || null,
+      email: req.auth?.user?.email || req.auth?.perfil?.email || "",
+      nome: req.auth?.perfil?.nome || req.auth?.user?.email || "",
+      role: req.auth?.perfil?.role || ""
+    }
+  };
+}
+
+function montarHtmlTicketSuporte(ticket) {
+  const campo = (label, valor) => `
+    <tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#64748b;width:180px">${escaparHtmlSuporte(label)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0">${escaparHtmlSuporte(valor || "-")}</td>
+    </tr>`;
+
+  return `
+<!doctype html>
+<html lang="pt-BR">
+<body style="margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#102a43">
+  <div style="max-width:760px;margin:24px auto;background:#ffffff;border:1px solid #dbe3ec">
+    <div style="background:#12355b;padding:22px">
+      <h1 style="margin:0;color:#ffffff;font-size:22px">Calibra<span style="color:#2dd4bf">Flow</span></h1>
+      <p style="margin:8px 0 0;color:#dbeafe">Novo chamado aberto pelo sistema</p>
+    </div>
+    <div style="padding:22px">
+      <h2 style="margin:0 0 12px;font-size:18px">${escaparHtmlSuporte(ticket.assunto)}</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:18px">
+        ${campo("Ticket", ticket.id)}
+        ${campo("Modulo", ticket.modulo)}
+        ${campo("Categoria", ticket.categoria)}
+        ${campo("Prioridade", ticket.prioridade)}
+        ${campo("Usuario", `${ticket.usuario.nome || "-"} <${ticket.usuario.email || "-"}>`)}
+        ${campo("Pagina", ticket.pagina)}
+        ${campo("Criado em", ticket.criado_em)}
+      </table>
+      <div style="background:#f8fafc;border-left:4px solid #2dd4bf;padding:16px;white-space:pre-wrap">${escaparHtmlSuporte(ticket.mensagem)}</div>
+    </div>
+    <div style="padding:14px;text-align:center;background:#f1f5f9;color:#64748b;font-size:12px">
+      CalibraFlow - Gestao de Certificados
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function montarTextoTelegramSuporte(ticket) {
+  return [
+    "<b>Novo chamado CalibraFlow</b>",
+    `<b>Ticket:</b> ${escaparHtmlSuporte(ticket.id)}`,
+    `<b>Modulo:</b> ${escaparHtmlSuporte(ticket.modulo)}`,
+    `<b>Prioridade:</b> ${escaparHtmlSuporte(ticket.prioridade)}`,
+    `<b>Categoria:</b> ${escaparHtmlSuporte(ticket.categoria)}`,
+    `<b>Usuario:</b> ${escaparHtmlSuporte(ticket.usuario.nome || "-")} (${escaparHtmlSuporte(ticket.usuario.email || "-")})`,
+    `<b>Assunto:</b> ${escaparHtmlSuporte(ticket.assunto)}`,
+    `<b>Pagina:</b> ${escaparHtmlSuporte(ticket.pagina || "-")}`,
+    "",
+    escaparHtmlSuporte(ticket.mensagem).slice(0, 2500)
+  ].join("\n");
+}
+
+async function gravarTicketSuporte(ticket) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return { ok: false, aviso: "Supabase nao configurado" };
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_tickets`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "return=minimal" },
+      body: JSON.stringify({
+        id: ticket.id,
+        modulo: ticket.modulo,
+        assunto: ticket.assunto,
+        categoria: ticket.categoria,
+        prioridade: ticket.prioridade,
+        mensagem: ticket.mensagem,
+        pagina: ticket.pagina || null,
+        status: "aberto",
+        usuario_id: ticket.usuario.id,
+        usuario_email: ticket.usuario.email || null,
+        usuario_nome: ticket.usuario.nome || null,
+        criado_em: ticket.criado_em
+      })
+    });
+    if (!response.ok) return { ok: false, aviso: await response.text() };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, aviso: e.message };
+  }
+}
+
+async function enviarEmailTicketSuporte(ticket) {
+  if (!SUPPORT_RESEND_API_KEY) return { ok: false, aviso: "RESEND_API_KEY nao configurada" };
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPPORT_RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: SUPPORT_FROM_EMAIL,
+        to: [SUPPORT_TO_EMAIL],
+        subject: `[${ticket.id}] ${ticket.assunto}`,
+        html: montarHtmlTicketSuporte(ticket),
+        reply_to: ticket.usuario.email || SUPPORT_TO_EMAIL
+      })
+    });
+    if (!response.ok) return { ok: false, aviso: await response.text() };
+    const data = await response.json().catch(() => ({}));
+    return { ok: true, id: data.id || null };
+  } catch (e) {
+    return { ok: false, aviso: e.message };
+  }
+}
+
+async function enviarTelegramTicketSuporte(ticket) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return { ok: false, aviso: "Telegram nao configurado" };
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: montarTextoTelegramSuporte(ticket),
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      })
+    });
+    if (!response.ok) return { ok: false, aviso: await response.text() };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, aviso: e.message };
+  }
+}
+
+async function abrirTicketSuporte(req, res, modulo) {
+  try {
+    const ticket = montarTicketSuporte(req, modulo);
+    const [banco, email, telegram] = await Promise.all([
+      gravarTicketSuporte(ticket),
+      enviarEmailTicketSuporte(ticket),
+      enviarTelegramTicketSuporte(ticket)
+    ]);
+
+    res.status(201).json({
+      ok: true,
+      ticket_id: ticket.id,
+      mensagem: "Chamado registrado",
+      banco_gravado: banco.ok,
+      email_enviado: email.ok,
+      telegram_enviado: telegram.ok,
+      avisos: [banco, email, telegram]
+        .filter(item => !item.ok && item.aviso)
+        .map(item => item.aviso)
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({
+      erro: e.statusCode === 400 ? e.message : "Nao foi possivel abrir o chamado"
+    });
+  }
+}
+
 function limparCachesAuth() {
   const agora = Date.now();
   for (const [chave, item] of authCache) {
@@ -325,13 +539,14 @@ function identificarAcaoAuditoriaDLH(metodo, rota) {
   if (metodo === "POST" && rota.startsWith("/dlh/downloads/massa/") && rota.endsWith("/link")) return ["BAIXAR_ZIP", "Link temporário do ZIP DLH gerado"];
   if (metodo === "GET" && rota.startsWith("/dlh/downloads/massa/") && rota.endsWith("/arquivo")) return ["BAIXAR_ZIP", "Arquivo ZIP DLH baixado"];
   if (metodo === "GET" && rota.startsWith("/dlh/download/")) return ["DOWNLOAD_CERTIFICADO", "Certificado DLH baixado"];
+  if (metodo === "POST" && rota === "/dlh/suporte/tickets") return ["ABRIR_TICKET", "Ticket de suporte DLH aberto"];
   return null;
 }
 
 function entidadeAuditoriaDLH(rota) {
   const partes = String(rota || "").split("/").filter(Boolean);
   const candidato = partes.at(-1);
-  if (!candidato || ["sync", "reprocess", "massa", "arquivo", "criterios"].includes(candidato)) return null;
+  if (!candidato || ["sync", "reprocess", "massa", "arquivo", "criterios", "tickets"].includes(candidato)) return null;
   return candidato.slice(0, 160);
 }
 
@@ -2830,9 +3045,14 @@ app.get("/dlh/versao", (_req, res) => {
       "/dlh/assistente/chamado-calibracao",
       "/dlh/assistente/perguntar",
       "/dlh/loggers/disponibilidade",
-      "/dlh/loggers/checklist-pre-teste"
+      "/dlh/loggers/checklist-pre-teste",
+      "/dlh/suporte/tickets"
     ]
   });
+});
+
+app.post("/dlh/suporte/tickets", async (req, res) => {
+  await abrirTicketSuporte(req, res, "DLH");
 });
 
 app.get("/dlh/criterios", async (req, res) => {
