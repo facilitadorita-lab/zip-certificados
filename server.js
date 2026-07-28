@@ -1040,13 +1040,13 @@ async function atualizarTicketComoRespondido(ticketId) {
   }
 }
 
-async function enviarAvisoTelegram(texto, replyToMessageId) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
+async function enviarTelegramParaChat(chatId, texto, replyToMessageId) {
+  if (!TELEGRAM_BOT_TOKEN || !chatId) return false;
   const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
+      chat_id: chatId,
       text: texto,
       parse_mode: "HTML",
       reply_to_message_id: replyToMessageId || undefined,
@@ -1054,6 +1054,10 @@ async function enviarAvisoTelegram(texto, replyToMessageId) {
     })
   });
   return response.ok;
+}
+
+async function enviarAvisoTelegram(texto, replyToMessageId) {
+  return enviarTelegramParaChat(TELEGRAM_CHAT_ID, texto, replyToMessageId);
 }
 
 async function processarWebhookTelegram(req, res) {
@@ -1065,7 +1069,27 @@ async function processarWebhookTelegram(req, res) {
   const mensagemTelegram = update.message;
   if (!mensagemTelegram) return res.status(200).json({ ok: true, ignorado: true });
 
-  if (String(mensagemTelegram.chat?.id || "") !== String(TELEGRAM_CHAT_ID || "")) {
+  const chatIdRecebido = String(mensagemTelegram.chat?.id || "").trim();
+  const textoRecebido = String(
+    mensagemTelegram.text || mensagemTelegram.caption || ""
+  ).trim();
+
+  // Permite descobrir o ID sem apagar o webhook nem usar getUpdates.
+  // A resposta so e emitida apos a validacao do segredo do webhook acima.
+  if (!TELEGRAM_CHAT_ID && /^\/mostrar_id(?:@\w+)?$/i.test(textoRecebido)) {
+    const enviado = await enviarTelegramParaChat(
+      chatIdRecebido,
+      [
+        "<b>Identificacao do chat</b>",
+        `TELEGRAM_CHAT_ID: <code>${escaparHtml(chatIdRecebido)}</code>`,
+        "Copie somente o numero acima para a variavel TELEGRAM_CHAT_ID no Render."
+      ].join("\n"),
+      mensagemTelegram.message_id
+    );
+    return res.status(200).json({ ok: true, identificacao_chat: enviado });
+  }
+
+  if (chatIdRecebido !== String(TELEGRAM_CHAT_ID || "")) {
     return res.status(200).json({ ok: true, ignorado: true });
   }
 
@@ -3261,6 +3285,8 @@ app.get("/status-publico", (_req, res) => {
   res.json({
     ok: true,
     modulo: "DLT",
+    telegram_token_configurado: Boolean(TELEGRAM_BOT_TOKEN),
+    telegram_chat_configurado: Boolean(TELEGRAM_CHAT_ID),
     telegram_configurado: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
     verificado_em: new Date().toISOString()
   });

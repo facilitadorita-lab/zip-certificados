@@ -3139,6 +3139,8 @@ app.get("/dlh/status-publico", (_req, res) => {
   res.json({
     ok: true,
     modulo: "DLH",
+    telegram_token_configurado: Boolean(TELEGRAM_BOT_TOKEN),
+    telegram_chat_configurado: Boolean(TELEGRAM_CHAT_ID),
     telegram_configurado: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
     verificado_em: new Date().toISOString()
   });
