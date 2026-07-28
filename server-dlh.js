@@ -690,6 +690,7 @@ app.use(async (req, res, next) => {
     req.method === "OPTIONS" ||
     req.path === "/" ||
     req.path === "/dlh/versao" ||
+    req.path === "/dlh/status-publico" ||
     req.path.startsWith("/dlh/automacao/") ||
     possuiTicketDownload
   ) {

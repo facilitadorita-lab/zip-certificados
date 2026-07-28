@@ -393,6 +393,7 @@ app.use(async (req, res, next) => {
     req.method === "OPTIONS" ||
     req.path === "/" ||
     req.path === "/versao" ||
+    req.path === "/status-publico" ||
     req.path === "/suporte/telegram/webhook" ||
     req.path.startsWith("/automacao/") ||
     possuiTicketDownload
