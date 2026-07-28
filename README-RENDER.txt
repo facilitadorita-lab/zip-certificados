@@ -24,3 +24,14 @@ IMPORTANTE PARA OS RELATORIOS PDF
 
 Nunca coloque valores secretos nos arquivos.
 Cadastre os valores indicados em .env.example na tela Environment do Render.
+
+SUPORTE POR E-MAIL E TELEGRAM
+- SUPPORT_TO_EMAIL: e-mail que recebe os novos tickets.
+- SUPPORT_FROM_EMAIL: remetente verificado no Resend.
+- SUPPORT_RESEND_API_KEY: chave de envio do Resend.
+- TELEGRAM_BOT_TOKEN: token do bot criado no BotFather.
+- TELEGRAM_CHAT_ID: chat autorizado a receber e responder tickets.
+- TELEGRAM_WEBHOOK_SECRET: segredo longo usado pelo Telegram no webhook.
+- O webhook de resposta fica somente no DLT:
+  https://zip-certificados.onrender.com/suporte/telegram/webhook
+- Para responder ao usuario, use "Responder" na mensagem original do ticket no Telegram.

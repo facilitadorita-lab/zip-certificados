@@ -93,6 +93,7 @@ const SUPPORT_FROM_EMAIL =
 const SUPPORT_RESEND_API_KEY = process.env.SUPPORT_RESEND_API_KEY || process.env.RESEND_API_KEY || "";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
   "nome_original",
@@ -389,6 +390,7 @@ app.use(async (req, res, next) => {
     req.method === "OPTIONS" ||
     req.path === "/" ||
     req.path === "/versao" ||
+    req.path === "/suporte/telegram/webhook" ||
     req.path.startsWith("/automacao/") ||
     possuiTicketDownload
   ) {
@@ -829,7 +831,9 @@ function montarTextoTelegramSuporte(ticket) {
     `<b>Assunto:</b> ${escaparHtml(ticket.assunto)}`,
     `<b>Pagina:</b> ${escaparHtml(ticket.pagina || "-")}`,
     "",
-    escaparHtml(ticket.mensagem).slice(0, 2500)
+    escaparHtml(ticket.mensagem).slice(0, 2500),
+    "",
+    "<i>Para responder ao usuario, use a funcao Responder nesta mensagem.</i>"
   ].join("\n");
 }
 
@@ -858,6 +862,230 @@ async function gravarTicketSuporte(ticket) {
     return { ok: true };
   } catch (e) {
     return { ok: false, aviso: e.message };
+  }
+}
+
+function valoresSegurosIguais(esperado, recebido) {
+  const esperadoBuffer = Buffer.from(String(esperado || ""));
+  const recebidoBuffer = Buffer.from(String(recebido || ""));
+  return (
+    esperadoBuffer.length > 0 &&
+    esperadoBuffer.length === recebidoBuffer.length &&
+    crypto.timingSafeEqual(esperadoBuffer, recebidoBuffer)
+  );
+}
+
+function validarWebhookTelegram(req) {
+  return valoresSegurosIguais(
+    TELEGRAM_WEBHOOK_SECRET,
+    req.headers["x-telegram-bot-api-secret-token"]
+  );
+}
+
+function extrairTicketIdTelegram(texto) {
+  const encontrado = String(texto || "").match(
+    /\bTKT-(?:DLT|DLH)-\d{14}-[A-F0-9]{6}\b/i
+  );
+  return encontrado ? encontrado[0].toUpperCase() : "";
+}
+
+async function buscarTicketSuporte(ticketId) {
+  const params = new URLSearchParams({
+    select: "id,modulo,assunto,categoria,prioridade,mensagem,status,usuario_id,usuario_email,usuario_nome,criado_em",
+    id: `eq.${ticketId}`,
+    limit: "1"
+  });
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_tickets?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  const tickets = validarListaSupabase(response, data, "Supabase ticket de suporte");
+  return tickets[0] || null;
+}
+
+function montarHtmlRespostaTicketSuporte(ticket, resposta) {
+  return `
+<!doctype html>
+<html lang="pt-BR">
+<body style="margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#102a43">
+  <div style="max-width:760px;margin:24px auto;background:#ffffff;border:1px solid #dbe3ec">
+    <div style="background:#12355b;padding:22px">
+      <h1 style="margin:0;color:#ffffff;font-size:22px">Calibra<span style="color:#2dd4bf">Flow</span></h1>
+      <p style="margin:8px 0 0;color:#dbeafe">Resposta do suporte</p>
+    </div>
+    <div style="padding:22px">
+      <p style="margin:0 0 8px;color:#64748b">Ticket ${escaparHtml(ticket.id)}</p>
+      <h2 style="margin:0 0 18px;font-size:18px">${escaparHtml(ticket.assunto || "Chamado de suporte")}</h2>
+      <div style="background:#f8fafc;border-left:4px solid #2dd4bf;padding:16px;white-space:pre-wrap">${escaparHtml(resposta)}</div>
+      <p style="margin-top:22px;color:#64748b;font-size:13px">
+        Para continuar o atendimento, responda este e-mail mantendo o numero do ticket no assunto.
+      </p>
+      <p style="margin-top:18px">
+        <a href="https://www.calibraflow.com" style="color:#0f766e;font-weight:600">Acessar o CalibraFlow</a>
+      </p>
+    </div>
+    <div style="padding:14px;text-align:center;background:#f1f5f9;color:#64748b;font-size:12px">
+      CalibraFlow - Gestao de Certificados
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+async function enviarEmailRespostaTicketSuporte(ticket, resposta, updateId) {
+  if (!SUPPORT_RESEND_API_KEY) throw new Error("RESEND_API_KEY nao configurada");
+  if (!ticket?.usuario_email) throw new Error("Ticket sem e-mail do usuario");
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SUPPORT_RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+      "Idempotency-Key": `telegram-ticket-${updateId}`
+    },
+    body: JSON.stringify({
+      from: SUPPORT_FROM_EMAIL,
+      to: [ticket.usuario_email],
+      subject: `[${ticket.id}] Resposta do suporte - ${ticket.assunto || "CalibraFlow"}`,
+      html: montarHtmlRespostaTicketSuporte(ticket, resposta),
+      reply_to: SUPPORT_TO_EMAIL
+    })
+  });
+
+  if (!response.ok) {
+    const detalhe = await response.text();
+    throw new Error(`Falha ao enviar e-mail de resposta (${response.status}): ${detalhe}`);
+  }
+  return response.json().catch(() => ({}));
+}
+
+async function gravarRespostaTicketSuporte(ticket, resposta, mensagemTelegram, updateId) {
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_ticket_mensagens`, {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=ignore-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        ticket_id: ticket.id,
+        autor_tipo: "suporte",
+        autor_nome:
+          [mensagemTelegram?.from?.first_name, mensagemTelegram?.from?.last_name]
+            .filter(Boolean)
+            .join(" ") || "Suporte CalibraFlow",
+        autor_email: SUPPORT_TO_EMAIL,
+        mensagem: resposta,
+        canal: "telegram",
+        telegram_update_id: String(updateId),
+        criado_em: new Date().toISOString()
+      })
+    });
+    return { ok: response.ok, aviso: response.ok ? null : await response.text() };
+  } catch (e) {
+    return { ok: false, aviso: e.message };
+  }
+}
+
+async function atualizarTicketComoRespondido(ticketId) {
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/suporte_tickets?id=eq.${encodeURIComponent(ticketId)}`,
+      {
+        method: "PATCH",
+        headers: { ...supabaseHeaders(), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "respondido" })
+      }
+    );
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function enviarAvisoTelegram(texto, replyToMessageId) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return false;
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text: texto,
+      parse_mode: "HTML",
+      reply_to_message_id: replyToMessageId || undefined,
+      disable_web_page_preview: true
+    })
+  });
+  return response.ok;
+}
+
+async function processarWebhookTelegram(req, res) {
+  if (!validarWebhookTelegram(req)) {
+    return res.status(401).json({ erro: "Webhook nao autorizado" });
+  }
+
+  const update = req.body || {};
+  const mensagemTelegram = update.message;
+  if (!mensagemTelegram) return res.status(200).json({ ok: true, ignorado: true });
+
+  if (String(mensagemTelegram.chat?.id || "") !== String(TELEGRAM_CHAT_ID || "")) {
+    return res.status(200).json({ ok: true, ignorado: true });
+  }
+
+  const resposta = limitarTextoSuporte(
+    mensagemTelegram.text || mensagemTelegram.caption,
+    5000
+  );
+  if (!resposta || resposta.startsWith("/")) {
+    return res.status(200).json({ ok: true, ignorado: true });
+  }
+
+  const ticketId = extrairTicketIdTelegram(
+    mensagemTelegram.reply_to_message?.text || mensagemTelegram.reply_to_message?.caption
+  );
+  if (!ticketId) {
+    await enviarAvisoTelegram(
+      "Para responder um chamado, use <b>Responder</b> diretamente na mensagem original do ticket.",
+      mensagemTelegram.message_id
+    );
+    return res.status(200).json({ ok: true, instrucao_enviada: true });
+  }
+
+  try {
+    const ticket = await buscarTicketSuporte(ticketId);
+    if (!ticket) {
+      await enviarAvisoTelegram(
+        `Ticket <b>${escaparHtml(ticketId)}</b> nao encontrado.`,
+        mensagemTelegram.message_id
+      );
+      return res.status(200).json({ ok: true, ticket_encontrado: false });
+    }
+
+    await enviarEmailRespostaTicketSuporte(ticket, resposta, update.update_id);
+    const [registro] = await Promise.all([
+      gravarRespostaTicketSuporte(ticket, resposta, mensagemTelegram, update.update_id),
+      atualizarTicketComoRespondido(ticket.id)
+    ]);
+
+    await enviarAvisoTelegram(
+      [
+        "<b>Resposta enviada</b>",
+        `Ticket: ${escaparHtml(ticket.id)}`,
+        `Destino: ${escaparHtml(ticket.usuario_email)}`,
+        registro.ok
+          ? "A resposta tambem foi registrada no historico."
+          : "E-mail enviado. O historico sera habilitado apos aplicar a tabela de mensagens."
+      ].join("\n"),
+      mensagemTelegram.message_id
+    );
+    return res.status(200).json({ ok: true, email_enviado: true });
+  } catch (e) {
+    console.error("Falha no webhook do Telegram:", e.message);
+    await enviarAvisoTelegram(
+      "Nao foi possivel enviar a resposta. Verifique o backend e tente novamente.",
+      mensagemTelegram.message_id
+    ).catch(() => {});
+    return res.status(200).json({ ok: false });
   }
 }
 
@@ -900,7 +1128,8 @@ async function enviarTelegramTicketSuporte(ticket) {
       })
     });
     if (!response.ok) return { ok: false, aviso: await response.text() };
-    return { ok: true };
+    const data = await response.json().catch(() => ({}));
+    return { ok: true, message_id: data?.result?.message_id || null };
   } catch (e) {
     return { ok: false, aviso: e.message };
   }
@@ -2952,6 +3181,10 @@ app.get("/auth/me", (req, res) => {
 
 app.post("/suporte/tickets", async (req, res) => {
   await abrirTicketSuporte(req, res, "DLT");
+});
+
+app.post("/suporte/telegram/webhook", async (req, res) => {
+  await processarWebhookTelegram(req, res);
 });
 
 app.get("/auditoria", async (req, res) => {

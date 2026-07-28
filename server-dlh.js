@@ -360,7 +360,9 @@ function montarTextoTelegramSuporte(ticket) {
     `<b>Assunto:</b> ${escaparHtmlSuporte(ticket.assunto)}`,
     `<b>Pagina:</b> ${escaparHtmlSuporte(ticket.pagina || "-")}`,
     "",
-    escaparHtmlSuporte(ticket.mensagem).slice(0, 2500)
+    escaparHtmlSuporte(ticket.mensagem).slice(0, 2500),
+    "",
+    "<i>Para responder ao usuario, use a funcao Responder nesta mensagem.</i>"
   ].join("\n");
 }
 
