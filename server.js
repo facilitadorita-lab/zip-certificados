@@ -903,6 +903,39 @@ async function buscarTicketSuporte(ticketId) {
   return tickets[0] || null;
 }
 
+async function listarTicketsSuporteDoUsuario(usuarioId, modulo) {
+  const params = new URLSearchParams({
+    select: "id,modulo,assunto,categoria,prioridade,mensagem,pagina,status,usuario_id,usuario_email,usuario_nome,criado_em",
+    usuario_id: `eq.${usuarioId}`,
+    order: "criado_em.desc",
+    limit: "100"
+  });
+  if (modulo) params.set("modulo", `eq.${modulo}`);
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_tickets?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  return validarListaSupabase(response, data, "Supabase lista de tickets");
+}
+
+async function listarMensagensTicketSuporte(ticketId, usuarioId) {
+  const ticket = await buscarTicketSuporte(ticketId);
+  if (!ticket || ticket.usuario_id !== usuarioId) return null;
+
+  const params = new URLSearchParams({
+    select: "id,ticket_id,autor_tipo,autor_nome,autor_email,mensagem,canal,criado_em",
+    ticket_id: `eq.${ticketId}`,
+    order: "criado_em.asc",
+    limit: "200"
+  });
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_ticket_mensagens?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  return { ticket, mensagens: validarListaSupabase(response, data, "Supabase mensagens do ticket") };
+}
+
 function montarHtmlRespostaTicketSuporte(ticket, resposta) {
   return `
 <!doctype html>
@@ -3181,6 +3214,28 @@ app.get("/auth/me", (req, res) => {
 
 app.post("/suporte/tickets", async (req, res) => {
   await abrirTicketSuporte(req, res, "DLT");
+});
+
+app.get("/suporte/tickets", async (req, res) => {
+  try {
+    const modulo = String(req.query.modulo || "").trim().toUpperCase();
+    const tickets = await listarTicketsSuporteDoUsuario(req.auth.user.id, ["DLT", "DLH"].includes(modulo) ? modulo : "");
+    res.setHeader("Cache-Control", "private, max-age=15");
+    res.json({ ok: true, tickets });
+  } catch (e) {
+    res.status(500).json({ erro: "Nao foi possivel carregar os tickets" });
+  }
+});
+
+app.get("/suporte/tickets/:ticketId", async (req, res) => {
+  try {
+    const resultado = await listarMensagensTicketSuporte(req.params.ticketId, req.auth.user.id);
+    if (!resultado) return res.status(404).json({ erro: "Ticket nao encontrado" });
+    res.setHeader("Cache-Control", "private, max-age=10");
+    res.json({ ok: true, ...resultado });
+  } catch (e) {
+    res.status(500).json({ erro: "Nao foi possivel carregar o ticket" });
+  }
 });
 
 app.post("/suporte/telegram/webhook", async (req, res) => {

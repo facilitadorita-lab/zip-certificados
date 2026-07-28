@@ -394,6 +394,53 @@ async function gravarTicketSuporte(ticket) {
   }
 }
 
+async function buscarTicketSuporteDLH(ticketId) {
+  const params = new URLSearchParams({
+    select: "id,modulo,assunto,categoria,prioridade,mensagem,pagina,status,usuario_id,usuario_email,usuario_nome,criado_em",
+    id: `eq.${ticketId}`,
+    limit: "1"
+  });
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_tickets?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  const tickets = validarListaSupabase(response, data, "Supabase ticket de suporte");
+  return tickets[0] || null;
+}
+
+async function listarTicketsSuporteDoUsuarioDLH(usuarioId, modulo) {
+  const params = new URLSearchParams({
+    select: "id,modulo,assunto,categoria,prioridade,mensagem,pagina,status,usuario_id,usuario_email,usuario_nome,criado_em",
+    usuario_id: `eq.${usuarioId}`,
+    order: "criado_em.desc",
+    limit: "100"
+  });
+  if (modulo) params.set("modulo", `eq.${modulo}`);
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_tickets?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  return validarListaSupabase(response, data, "Supabase lista de tickets");
+}
+
+async function listarMensagensTicketSuporteDLH(ticketId, usuarioId) {
+  const ticket = await buscarTicketSuporteDLH(ticketId);
+  if (!ticket || ticket.usuario_id !== usuarioId) return null;
+
+  const params = new URLSearchParams({
+    select: "id,ticket_id,autor_tipo,autor_nome,autor_email,mensagem,canal,criado_em",
+    ticket_id: `eq.${ticketId}`,
+    order: "criado_em.asc",
+    limit: "200"
+  });
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/suporte_ticket_mensagens?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  return { ticket, mensagens: validarListaSupabase(response, data, "Supabase mensagens do ticket") };
+}
+
 async function enviarEmailTicketSuporte(ticket) {
   if (!SUPPORT_RESEND_API_KEY) return { ok: false, aviso: "RESEND_API_KEY nao configurada" };
   try {
@@ -3055,6 +3102,27 @@ app.get("/dlh/versao", (_req, res) => {
 
 app.post("/dlh/suporte/tickets", async (req, res) => {
   await abrirTicketSuporte(req, res, "DLH");
+});
+
+app.get("/dlh/suporte/tickets", async (req, res) => {
+  try {
+    const tickets = await listarTicketsSuporteDoUsuarioDLH(req.auth.user.id, "DLH");
+    res.setHeader("Cache-Control", "private, max-age=15");
+    res.json({ ok: true, tickets });
+  } catch (e) {
+    res.status(500).json({ erro: "Nao foi possivel carregar os tickets" });
+  }
+});
+
+app.get("/dlh/suporte/tickets/:ticketId", async (req, res) => {
+  try {
+    const resultado = await listarMensagensTicketSuporteDLH(req.params.ticketId, req.auth.user.id);
+    if (!resultado) return res.status(404).json({ erro: "Ticket nao encontrado" });
+    res.setHeader("Cache-Control", "private, max-age=10");
+    res.json({ ok: true, ...resultado });
+  } catch (e) {
+    res.status(500).json({ erro: "Nao foi possivel carregar o ticket" });
+  }
 });
 
 app.get("/dlh/criterios", async (req, res) => {
