@@ -1149,6 +1149,10 @@ async function enviarEmailTicketSuporte(ticket) {
 
 async function enviarTelegramTicketSuporte(ticket) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return { ok: false, aviso: "Telegram nao configurado" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
   try {
     const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -1158,13 +1162,34 @@ async function enviarTelegramTicketSuporte(ticket) {
         text: montarTextoTelegramSuporte(ticket),
         parse_mode: "HTML",
         disable_web_page_preview: true
-      })
+      }),
+      signal: controller.signal
     });
-    if (!response.ok) return { ok: false, aviso: await response.text() };
+
     const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.ok !== true) {
+      const descricao = String(data?.description || "resposta invalida da API do Telegram")
+        .replace(/[\r\n]+/g, " ")
+        .slice(0, 240);
+      console.error("Falha ao enviar novo ticket para o Telegram", {
+        status: response.status,
+        codigo: data?.error_code || null,
+        descricao
+      });
+      return { ok: false, aviso: `Telegram recusou o envio (${response.status})` };
+    }
+
     return { ok: true, message_id: data?.result?.message_id || null };
   } catch (e) {
-    return { ok: false, aviso: e.message };
+    const aviso = e?.name === "AbortError"
+      ? "Tempo esgotado ao enviar para o Telegram"
+      : "Falha de comunicacao com o Telegram";
+    console.error("Falha de comunicacao ao enviar novo ticket para o Telegram", {
+      tipo: e?.name || "Error"
+    });
+    return { ok: false, aviso };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -1195,6 +1220,7 @@ async function abrirTicketSuporte(req, res, modulo) {
       banco_gravado: banco.ok,
       email_enviado: email.ok,
       telegram_enviado: telegram.ok,
+      telegram_aviso: telegram.ok ? null : telegram.aviso || "Telegram indisponivel",
       avisos: [banco, email, telegram]
         .filter(item => !item.ok && item.aviso)
         .map(item => item.aviso)
