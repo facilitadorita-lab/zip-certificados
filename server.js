@@ -91,8 +91,11 @@ const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.co
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
 const SUPPORT_RESEND_API_KEY = process.env.SUPPORT_RESEND_API_KEY || process.env.RESEND_API_KEY || "";
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const limparConfiguracao = (valor) => String(valor || "")
+  .trim()
+  .replace(/^['"]|['"]$/g, "");
+const TELEGRAM_BOT_TOKEN = limparConfiguracao(process.env.TELEGRAM_BOT_TOKEN);
+const TELEGRAM_CHAT_ID = limparConfiguracao(process.env.TELEGRAM_CHAT_ID);
 const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const CERTIFICADOS_LISTA_SELECT = [
   "id",
@@ -1148,49 +1151,86 @@ async function enviarEmailTicketSuporte(ticket) {
 }
 
 async function enviarTelegramTicketSuporte(ticket) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return { ok: false, aviso: "Telegram nao configurado" };
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    return { ok: false, aviso: "Telegram nao configurado no backend" };
+  }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const payload = {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: montarTextoTelegramSuporte(ticket),
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  };
 
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: montarTextoTelegramSuporte(ticket),
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      }),
-      signal: controller.signal
-    });
+  for (let tentativa = 1; tentativa <= 2; tentativa += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
 
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data?.ok !== true) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.ok === true) {
+        return { ok: true, message_id: data?.result?.message_id || null };
+      }
+
+      const status = Number(response.status || 0);
+      const codigo = Number(data?.error_code || status || 0);
       const descricao = String(data?.description || "resposta invalida da API do Telegram")
         .replace(/[\r\n]+/g, " ")
         .slice(0, 240);
       console.error("Falha ao enviar novo ticket para o Telegram", {
-        status: response.status,
-        codigo: data?.error_code || null,
+        tentativa,
+        status,
+        codigo,
         descricao
       });
-      return { ok: false, aviso: `Telegram recusou o envio (${response.status})` };
-    }
 
-    return { ok: true, message_id: data?.result?.message_id || null };
-  } catch (e) {
-    const aviso = e?.name === "AbortError"
-      ? "Tempo esgotado ao enviar para o Telegram"
-      : "Falha de comunicacao com o Telegram";
-    console.error("Falha de comunicacao ao enviar novo ticket para o Telegram", {
-      tipo: e?.name || "Error"
-    });
-    return { ok: false, aviso };
-  } finally {
-    clearTimeout(timeout);
+      const temporario = status === 429 || status >= 500;
+      if (temporario && tentativa < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        continue;
+      }
+
+      const aviso = status === 401
+        ? "Token do Telegram invalido ou expirado"
+        : status === 400
+          ? "Chat do Telegram invalido ou mensagem rejeitada"
+          : status === 403
+            ? "Bot do Telegram sem permissao neste chat"
+            : status === 429
+              ? "Limite temporario do Telegram atingido"
+              : status >= 500
+                ? "Telegram indisponivel temporariamente"
+                : `Telegram recusou o envio (${status || codigo})`;
+      return { ok: false, aviso };
+    } catch (e) {
+      const temporario = e?.name === "AbortError" || tentativa < 2;
+      console.error("Falha de comunicacao ao enviar novo ticket para o Telegram", {
+        tentativa,
+        tipo: e?.name || "Error"
+      });
+      if (temporario && tentativa < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        continue;
+      }
+      return {
+        ok: false,
+        aviso: e?.name === "AbortError"
+          ? "Tempo esgotado ao enviar para o Telegram"
+          : "Falha de comunicacao com o Telegram"
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  return { ok: false, aviso: "Falha de comunicacao com o Telegram" };
 }
 
 async function abrirTicketSuporte(req, res, modulo) {
