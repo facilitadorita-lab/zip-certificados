@@ -3695,7 +3695,8 @@ app.get("/status", async (req, res) => {
       ultima_execucao: controle?.ultima_execucao || null,
       total_drive: totalDrive,
       total_banco: totalBanco,
-      faltantes
+      faltantes,
+      telegram_configurado: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
     };
 
     statusCache = { valor: payload, expiraEm: Date.now() + STATUS_CACHE_MS };
