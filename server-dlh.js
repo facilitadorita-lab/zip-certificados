@@ -489,8 +489,19 @@ async function enviarTelegramTicketSuporte(ticket) {
 async function abrirTicketSuporte(req, res, modulo) {
   try {
     const ticket = montarTicketSuporte(req, modulo);
-    const [banco, email, telegram] = await Promise.all([
-      gravarTicketSuporte(ticket),
+    // Persistir primeiro evita avisos no Telegram/e-mail apontando para tickets
+    // que nao existem no banco e, portanto, nao podem ser abertos ou respondidos.
+    const banco = await gravarTicketSuporte(ticket);
+    if (!banco.ok) {
+      console.error("Falha ao gravar ticket DLH:", banco.aviso || "erro desconhecido");
+      return res.status(503).json({
+        erro: "O chamado nao foi registrado. Tente novamente em instantes.",
+        ticket_id: ticket.id,
+        banco_gravado: false
+      });
+    }
+
+    const [email, telegram] = await Promise.all([
       enviarEmailTicketSuporte(ticket),
       enviarTelegramTicketSuporte(ticket)
     ]);
