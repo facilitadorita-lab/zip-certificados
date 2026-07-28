@@ -3254,6 +3254,17 @@ app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
 
+// Diagnóstico público mínimo: não consulta banco/Drive e nunca expõe segredos.
+app.get("/status-publico", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    modulo: "DLT",
+    telegram_configurado: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+    verificado_em: new Date().toISOString()
+  });
+});
+
 app.get("/versao", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({

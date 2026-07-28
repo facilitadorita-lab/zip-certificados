@@ -3132,6 +3132,17 @@ app.get("/", (req, res) => {
 });
 
 
+// Diagnóstico público mínimo: não consulta banco/Drive e nunca expõe segredos.
+app.get("/dlh/status-publico", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    modulo: "DLH",
+    telegram_configurado: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID),
+    verificado_em: new Date().toISOString()
+  });
+});
+
 app.get("/dlh/versao", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({
