@@ -9,20 +9,36 @@ on:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 8
     steps:
-      - name: Consultar DLT
+      - name: Acordar DLT
         env:
           AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
         run: |
-          curl --fail-with-body --silent --show-error --max-time 20 \
-            -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
-            https://zip-certificados.onrender.com/keepalive
+          for tentativa in 1 2 3; do
+            if curl --fail-with-body --silent --show-error \
+              --connect-timeout 30 --max-time 180 \
+              -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
+              https://zip-certificados.onrender.com/keepalive; then
+              exit 0
+            fi
+            echo "DLT ainda acordando; nova tentativa em 20 segundos..."
+            sleep 20
+          done
+          exit 1
 
-      - name: Consultar DLH
+      - name: Acordar DLH
         env:
           AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
         run: |
-          curl --fail-with-body --silent --show-error --max-time 20 \
-            -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
-            https://certificados-dlh.onrender.com/dlh/keepalive
+          for tentativa in 1 2 3; do
+            if curl --fail-with-body --silent --show-error \
+              --connect-timeout 30 --max-time 180 \
+              -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
+              https://certificados-dlh.onrender.com/dlh/keepalive; then
+              exit 0
+            fi
+            echo "DLH ainda acordando; nova tentativa em 20 segundos..."
+            sleep 20
+          done
+          exit 1
