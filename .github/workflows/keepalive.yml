@@ -7,53 +7,66 @@ on:
     paths:
       - ".github/workflows/keepalive.yml"
   schedule:
-    # 07:10 no horario de Brasilia (UTC-3).
     - cron: "10 10 * * *"
   workflow_dispatch:
 
 jobs:
-  keepalive:
+  keepalive-dlt:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Acordar DLT
+      - name: Acordar e consultar DLT
         env:
           AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
         run: |
-          echo "Aquecendo o serviço DLT..."
-          curl --silent --show-error --retry 3 --retry-delay 10 --retry-all-errors \
+          echo "Aquecendo DLT..."
+          curl -sS -o /dev/null --write-out "DLT aquecimento HTTP %{http_code}\n" \
             --connect-timeout 30 --max-time 180 \
+            --retry 3 --retry-delay 10 --retry-all-errors \
             https://certificados-dlt.onrender.com/status-publico || true
           sleep 10
+
           for tentativa in 1 2 3; do
-            if curl --fail-with-body --silent --show-error \
+            codigo=$(curl -sS -o /dev/null --write-out "%{http_code}" \
               --connect-timeout 30 --max-time 180 \
               -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
-              https://certificados-dlt.onrender.com/keepalive; then
-              exit 0
+              https://certificados-dlt.onrender.com/keepalive || true)
+            echo "DLT keepalive HTTP ${codigo} (tentativa ${tentativa})"
+            if [ "${codigo}" = "200" ]; then exit 0; fi
+            if [ "${codigo}" = "401" ] || [ "${codigo}" = "403" ]; then
+              echo "DLT rejeitou o AUTOMATION_SECRET configurado."
+              exit 1
             fi
-            echo "DLT ainda acordando; nova tentativa em 20 segundos..."
             sleep 20
           done
           exit 1
 
-      - name: Acordar DLH
+  keepalive-dlh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Acordar e consultar DLH
         env:
           AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
         run: |
-          echo "Aquecendo o serviço DLH..."
-          curl --silent --show-error --retry 3 --retry-delay 10 --retry-all-errors \
+          echo "Aquecendo DLH..."
+          curl -sS -o /dev/null --write-out "DLH aquecimento HTTP %{http_code}\n" \
             --connect-timeout 30 --max-time 180 \
+            --retry 3 --retry-delay 10 --retry-all-errors \
             https://certificados-dlh.onrender.com/dlh/status-publico || true
           sleep 10
+
           for tentativa in 1 2 3; do
-            if curl --fail-with-body --silent --show-error \
+            codigo=$(curl -sS -o /dev/null --write-out "%{http_code}" \
               --connect-timeout 30 --max-time 180 \
               -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
-              https://certificados-dlh.onrender.com/dlh/keepalive; then
-              exit 0
+              https://certificados-dlh.onrender.com/dlh/keepalive || true)
+            echo "DLH keepalive HTTP ${codigo} (tentativa ${tentativa})"
+            if [ "${codigo}" = "200" ]; then exit 0; fi
+            if [ "${codigo}" = "401" ] || [ "${codigo}" = "403" ]; then
+              echo "DLH rejeitou o AUTOMATION_SECRET configurado."
+              exit 1
             fi
-            echo "DLH ainda acordando; nova tentativa em 20 segundos..."
             sleep 20
           done
           exit 1
