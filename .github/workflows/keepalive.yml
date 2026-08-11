@@ -22,13 +22,13 @@ jobs:
           echo "Aquecendo o serviço DLT..."
           curl --silent --show-error --retry 3 --retry-delay 10 --retry-all-errors \
             --connect-timeout 30 --max-time 180 \
-            https://zip-certificados.onrender.com/status-publico || true
+            https://certificados-dlt.onrender.com/status-publico || true
           sleep 10
           for tentativa in 1 2 3; do
             if curl --fail-with-body --silent --show-error \
               --connect-timeout 30 --max-time 180 \
               -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
-              https://zip-certificados.onrender.com/keepalive; then
+              https://certificados-dlt.onrender.com/keepalive; then
               exit 0
             fi
             echo "DLT ainda acordando; nova tentativa em 20 segundos..."
