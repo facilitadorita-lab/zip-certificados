@@ -1,4 +1,5 @@
 name: Keep Supabase active
+# Validação automática após atualização dos secrets do Render e GitHub.
 
 on:
   push:
