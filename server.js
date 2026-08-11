@@ -3292,6 +3292,37 @@ app.get("/status-publico", (_req, res) => {
   });
 });
 
+// Keep-alive econômico: consulta somente uma linha para evitar pausa por inatividade.
+// Reutiliza o segredo da automação e nunca retorna dados de certificados.
+app.get("/keepalive", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+
+  const inicio = Date.now();
+  try {
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return res.status(503).json({ ok: false, erro: "Supabase não configurado" });
+    }
+
+    const resposta = await fetch(
+      `${SUPABASE_URL}/rest/v1/controle_sync?select=id&limit=1`,
+      {
+        method: "GET",
+        headers: supabaseHeaders(),
+        signal: AbortSignal.timeout(5000)
+      }
+    );
+
+    if (!resposta.ok) {
+      return res.status(502).json({ ok: false, erro: "Banco indisponível" });
+    }
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ ok: true, modulo: "DLT", banco: "ativo", tempo_ms: Date.now() - inicio });
+  } catch {
+    return res.status(503).json({ ok: false, erro: "Banco indisponível" });
+  }
+});
+
 app.get("/versao", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({

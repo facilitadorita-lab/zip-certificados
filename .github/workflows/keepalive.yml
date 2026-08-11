@@ -1,0 +1,28 @@
+name: Keep Supabase active
+
+on:
+  schedule:
+    # 07:10 no horario de Brasilia (UTC-3).
+    - cron: "10 10 * * *"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Consultar DLT
+        env:
+          AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
+            https://zip-certificados.onrender.com/keepalive
+
+      - name: Consultar DLH
+        env:
+          AUTOMATION_SECRET: ${{ secrets.AUTOMATION_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 20 \
+            -H "X-Automation-Secret: ${AUTOMATION_SECRET}" \
+            https://certificados-dlh.onrender.com/dlh/keepalive
