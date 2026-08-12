@@ -812,7 +812,97 @@ function soDigitos(texto) {
 const downloadJobsDLH = new Map();
 const downloadTicketsDLH = new Map();
 const DOWNLOAD_JOB_PROGRESS_STEP = Number(process.env.DOWNLOAD_JOB_PROGRESS_STEP || 25);
-const DOWNLOAD_TICKET_TTL_MS = Number(process.env.DOWNLOAD_TICKET_TTL_MS || 300000);
+const DOWNLOAD_TICKET_TTL_MS = Number(process.env.DOWNLOAD_TICKET_TTL_MS || 60 * 60 * 1000);
+const DOWNLOAD_JOB_TTL_MS = Number(process.env.DOWNLOAD_JOB_TTL_MS || 60 * 60 * 1000);
+const DOWNLOAD_MAX_CONCURRENT = Math.min(3, Math.max(1, Number(process.env.DOWNLOAD_MAX_CONCURRENT || 2)));
+const DOWNLOAD_BATCH_CONCURRENCY = Math.min(6, Math.max(2, Number(process.env.DOWNLOAD_BATCH_CONCURRENCY || 4)));
+const DOWNLOAD_MAX_QUEUE = Math.min(100, Math.max(1, Number(process.env.DOWNLOAD_MAX_QUEUE || 20)));
+const downloadQueueDLH = [];
+const downloadFingerprintsDLH = new Map();
+let downloadActiveCountDLH = 0;
+
+function atualizarPosicoesFilaDownloadsDLH() {
+  downloadQueueDLH.forEach((item, index) => {
+    const job = downloadJobsDLH.get(item.jobId);
+    if (job) job.fila_posicao = index + 1;
+  });
+}
+
+function criarChaveDownloadDLH({ ids, equipamentos, testeInicio, testeFim, usuario }) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    usuario: usuario || "anonimo",
+    ids: [...new Set(ids)].sort(),
+    equipamentos: [...new Set(equipamentos)].sort(),
+    testeInicio: testeInicio || null,
+    testeFim: testeFim || null
+  })).digest("hex");
+}
+
+function limparDownloadsExpiradosDLH() {
+  const agora = Date.now();
+  for (const [chave, jobId] of downloadFingerprintsDLH) {
+    const job = downloadJobsDLH.get(jobId);
+    const expiraEm = job?.expira_em ? Date.parse(job.expira_em) : 0;
+    if (!job || (expiraEm && expiraEm <= agora && !["pendente", "processando"].includes(job.status))) {
+      downloadFingerprintsDLH.delete(chave);
+    }
+  }
+  for (const [ticket, registro] of downloadTicketsDLH) {
+    if (registro.expiraEm <= agora) downloadTicketsDLH.delete(ticket);
+  }
+}
+
+function buscarDownloadDuplicadoDLH(chave) {
+  limparDownloadsExpiradosDLH();
+  const jobId = downloadFingerprintsDLH.get(chave);
+  const job = jobId ? downloadJobsDLH.get(jobId) : null;
+  if (!job) return null;
+  if (["erro", "cancelado"].includes(job.status)) {
+    downloadFingerprintsDLH.delete(chave);
+    return null;
+  }
+  return job;
+}
+
+function processarFilaDownloadsDLH() {
+  while (downloadActiveCountDLH < DOWNLOAD_MAX_CONCURRENT && downloadQueueDLH.length) {
+    const item = downloadQueueDLH.shift();
+    atualizarPosicoesFilaDownloadsDLH();
+    const job = downloadJobsDLH.get(item.jobId);
+    if (!job) continue;
+    downloadActiveCountDLH++;
+    job.fila_posicao = 0;
+    job.atualizado_em = new Date().toISOString();
+    salvarDownloadJobDLH(job).catch(() => {});
+    processarDownloadMassaDLH(item.jobId, item.registros)
+      .catch(async (e) => {
+        const atual = downloadJobsDLH.get(item.jobId);
+        if (!atual) return;
+        atual.status = "erro";
+        atual.erro = e.message;
+        atual.atualizado_em = new Date().toISOString();
+        await salvarDownloadJobDLH(atual).catch(() => {});
+        downloadFingerprintsDLH.delete(atual.chave_deduplicacao);
+      })
+      .finally(() => {
+        downloadActiveCountDLH--;
+        atualizarPosicoesFilaDownloadsDLH();
+        processarFilaDownloadsDLH();
+      });
+  }
+}
+
+function enfileirarDownloadDLH(jobId, registros) {
+  const job = downloadJobsDLH.get(jobId);
+  if (!job) return;
+  downloadQueueDLH.push({ jobId, registros });
+  atualizarPosicoesFilaDownloadsDLH();
+  job.atualizado_em = new Date().toISOString();
+  processarFilaDownloadsDLH();
+}
+
+const downloadCleanupTimerDLH = setInterval(limparDownloadsExpiradosDLH, 10 * 60 * 1000);
+if (typeof downloadCleanupTimerDLH.unref === "function") downloadCleanupTimerDLH.unref();
 
 function criarDownloadTicketDLH(jobId) {
   const ticket = crypto.randomBytes(32).toString("hex");
@@ -833,23 +923,21 @@ function validarDownloadTicketDLH(jobId, ticket) {
 function serializarDownloadJobDLH(job) {
   return {
     id: job.id,
+    user_id: job.solicitado_por || null,
     modulo: job.tipo || "DLH",
     status: job.status,
+    etapa: job.etapa || (job.status === "concluido" ? "Concluído" : job.status === "erro" ? "Falhou" : "Processando"),
     total: Number(job.total || 0),
-    processados: Number(job.processados || 0),
+    baixados: Number(job.processados || 0),
     falhas: Number(job.falhas || 0),
-    erros: Array.isArray(job.erros) ? job.erros.slice(-50) : [],
-    erro: job.erro || null,
-    aviso_drive: job.aviso_drive || null,
-    arquivo_zip_nome: job.arquivo_zip_nome || null,
-    arquivo_zip_drive_id: job.arquivo_zip_drive_id || null,
-    arquivo_zip_link: job.arquivo_zip_link || null,
-    solicitado_por: job.solicitado_por || null,
-    solicitado_email: job.solicitado_email || null,
-    parametros: job.parametros || {},
-    criado_em: job.criado_em,
-    atualizado_em: job.atualizado_em || new Date().toISOString(),
-    expira_em: job.expira_em || null
+    mensagem: job.mensagem || job.aviso_drive || null,
+    storage_path: job.arquivo_zip_drive_id || null,
+    download_url: job.arquivo_zip_link || null,
+    url_expires_at: job.expira_em || null,
+    expires_at: job.expira_em || null,
+    error: job.erro || null,
+    created_at: job.criado_em,
+    updated_at: job.atualizado_em || new Date().toISOString()
   };
 }
 
@@ -859,21 +947,24 @@ function hidratarDownloadJobDLH(row) {
     id: row.id,
     tipo: row.modulo || "DLH",
     status: row.status,
+    etapa: row.etapa || null,
     total: Number(row.total || 0),
-    processados: Number(row.processados || 0),
+    processados: Number(row.baixados || 0),
     falhas: Number(row.falhas || 0),
-    erros: Array.isArray(row.erros) ? row.erros : [],
-    erro: row.erro || null,
-    aviso_drive: row.aviso_drive || null,
-    arquivo_zip_nome: row.arquivo_zip_nome || null,
-    arquivo_zip_drive_id: row.arquivo_zip_drive_id || null,
-    arquivo_zip_link: row.arquivo_zip_link || null,
-    solicitado_por: row.solicitado_por || null,
-    solicitado_email: row.solicitado_email || null,
-    parametros: row.parametros || {},
-    criado_em: row.criado_em,
-    atualizado_em: row.atualizado_em,
-    expira_em: row.expira_em
+    mensagem: row.mensagem || null,
+    erros: [],
+    erro: row.error || null,
+    aviso_drive: row.mensagem || null,
+    arquivo_zip_nome: null,
+    arquivo_zip_local_path: null,
+    arquivo_zip_drive_id: row.storage_path || null,
+    arquivo_zip_link: row.download_url || null,
+    solicitado_por: row.user_id || null,
+    solicitado_email: null,
+    parametros: {},
+    criado_em: row.created_at,
+    atualizado_em: row.updated_at,
+    expira_em: row.expires_at || row.url_expires_at || null
   };
 }
 
@@ -908,15 +999,30 @@ async function buscarDownloadJobPersistidoDLH(jobId, modulo = "DLH") {
 async function listarDownloadJobsPersistidosDLH(modulo = "DLH", limit = 50, solicitadoPor = null) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return [];
   const filtroUsuario = solicitadoPor
-    ? `&solicitado_por=eq.${encodeURIComponent(solicitadoPor)}`
+    ? `&user_id=eq.${encodeURIComponent(solicitadoPor)}`
     : "";
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}${filtroUsuario}&select=*&order=criado_em.desc&limit=${limit}`,
+    `${SUPABASE_URL}/rest/v1/download_jobs?modulo=eq.${modulo}${filtroUsuario}&select=*&order=created_at.desc&limit=${limit}`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json().catch(() => []);
   if (!response.ok || !Array.isArray(data)) return [];
   return data.map(hidratarDownloadJobDLH);
+}
+
+async function listarHistoricoDownloadJobsDLH(modulo = "DLH", limit = 50, solicitadoPor = null) {
+  const persistidos = await listarDownloadJobsPersistidosDLH(modulo, limit, solicitadoPor);
+  const recentes = [...downloadJobsDLH.values()].filter((job) => {
+    if (job.tipo !== modulo) return false;
+    if (!solicitadoPor) return true;
+    return job.solicitado_por === solicitadoPor;
+  });
+  const porId = new Map();
+  for (const job of persistidos) porId.set(job.id, job);
+  for (const job of recentes) porId.set(job.id, job);
+  return [...porId.values()]
+    .sort((a, b) => Date.parse(b.criado_em || 0) - Date.parse(a.criado_em || 0))
+    .slice(0, limit);
 }
 
 function podeAcessarDownloadJobDLH(req, job) {
@@ -1692,32 +1798,50 @@ function agendarRemocaoArquivoTemporarioDLH(caminho, minutos = 60) {
 async function criarZipNoDiscoDLH(registros, zipPath, job) {
   const pastaTemporaria = await fs.promises.mkdtemp(path.join(os.tmpdir(), "certificados-dlh-"));
   const arquivos = [];
+  let proximoIndice = 0;
+  let ultimoProgressoSalvo = 0;
+  let persistencia = Promise.resolve();
+
+  const persistirProgresso = () => {
+    if (job.processados <= ultimoProgressoSalvo && job.processados !== registros.length) return persistencia;
+    ultimoProgressoSalvo = job.processados;
+    persistencia = persistencia.then(() => salvarDownloadJobDLH(job));
+    return persistencia;
+  };
 
   try {
-    for (let index = 0; index < registros.length; index++) {
-      const item = registros[index];
-      try {
-        const buffer = await baixarArquivoDriveComRetry(item.id);
-        const nome = limparNomeArquivo(
-          item.nome_download || item.nome_original || `DLH_${item.id}.pdf`
-        );
-        const caminho = path.join(pastaTemporaria, `${String(index + 1).padStart(4, "0")}_${nome}`);
-        await fs.promises.writeFile(caminho, buffer);
-        arquivos.push({ caminho, nome });
-        job.processados++;
-      } catch (e) {
-        job.falhas++;
-        job.erros.push({
-          id: item.id,
-          nome: item.nome_download || item.nome_original,
-          erro: e.message
-        });
+    const trabalhador = async () => {
+      while (true) {
+        const index = proximoIndice++;
+        if (index >= registros.length) return;
+        const item = registros[index];
+        try {
+          const buffer = await baixarArquivoDriveComRetry(item.id);
+          const nome = limparNomeArquivo(
+            item.nome_download || item.nome_original || `DLH_${item.id}.pdf`
+          );
+          const caminho = path.join(pastaTemporaria, `${String(index + 1).padStart(4, "0")}_${nome}`);
+          await fs.promises.writeFile(caminho, buffer);
+          arquivos.push({ caminho, nome, ordem: index });
+        } catch (e) {
+          job.falhas++;
+          job.erros.push({
+            id: item.id,
+            nome: item.nome_download || item.nome_original,
+            erro: e.message
+          });
+        } finally {
+          job.processados++;
+          job.atualizado_em = new Date().toISOString();
+          if (job.processados % DOWNLOAD_JOB_PROGRESS_STEP === 0 || job.processados === registros.length) {
+            await persistirProgresso();
+          }
+        }
       }
-      job.atualizado_em = new Date().toISOString();
-      if ((index + 1) % DOWNLOAD_JOB_PROGRESS_STEP === 0 || index === registros.length - 1) {
-        await salvarDownloadJobDLH(job);
-      }
-    }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(DOWNLOAD_BATCH_CONCURRENCY, registros.length) }, trabalhador));
+    await persistencia;
 
     if (!arquivos.length) {
       throw new Error("Nenhum certificado foi baixado com sucesso");
@@ -1731,7 +1855,7 @@ async function criarZipNoDiscoDLH(registros, zipPath, job) {
       archive.on("warning", reject);
       archive.on("error", reject);
       archive.pipe(output);
-      for (const arquivo of arquivos) {
+      for (const arquivo of arquivos.sort((a, b) => a.ordem - b.ordem)) {
         archive.file(arquivo.caminho, { name: arquivo.nome });
       }
       archive.finalize();
@@ -1743,6 +1867,7 @@ async function criarZipNoDiscoDLH(registros, zipPath, job) {
 
 async function processarDownloadMassaDLH(jobId, registros) {
   const job = downloadJobsDLH.get(jobId);
+  if (!job) throw new Error("Tarefa de download não encontrada");
   job.status = "processando";
   job.total = registros.length;
   job.atualizado_em = new Date().toISOString();
@@ -1764,6 +1889,8 @@ async function processarDownloadMassaDLH(jobId, registros) {
     job.arquivo_zip_local_path = zipPath;
     job.arquivo_zip_drive_id = arquivoDrive.id || null;
     job.arquivo_zip_link = arquivoDrive.webViewLink || arquivoDrive.webContentLink || null;
+    // O prazo começa quando o ZIP fica pronto, não quando entra na fila.
+    job.expira_em = new Date(Date.now() + DOWNLOAD_JOB_TTL_MS).toISOString();
     job.atualizado_em = new Date().toISOString();
     await salvarDownloadJobDLH(job);
     agendarRemocaoArquivoTemporarioDLH(zipPath, 60);
@@ -4090,6 +4217,29 @@ app.post("/dlh/downloads/massa", async (req, res) => {
       return res.status(400).json({ erro: "Informe ids ou equipamentos + teste_inicio + teste_fim" });
     }
 
+    const usuarioDownload = req.auth?.user?.id || req.auth?.user?.email || req.auth?.perfil?.email || "anonimo";
+    const chaveDeduplicacao = criarChaveDownloadDLH({
+      ids,
+      equipamentos: listaEquipamentos,
+      testeInicio,
+      testeFim,
+      usuario: usuarioDownload
+    });
+    const jobExistente = buscarDownloadDuplicadoDLH(chaveDeduplicacao);
+    if (jobExistente) {
+      return res.status(202).json({
+        job_id: jobExistente.id,
+        total: jobExistente.total,
+        reusado: true,
+        fila_posicao: Number(jobExistente.fila_posicao || 0),
+        expira_em: jobExistente.expira_em || null,
+        concorrencia_maxima: DOWNLOAD_MAX_CONCURRENT
+      });
+    }
+    if (downloadQueueDLH.length >= DOWNLOAD_MAX_QUEUE) {
+      return res.status(429).json({ erro: "A fila de downloads está cheia. Tente novamente em instantes." });
+    }
+
     const jobId = crypto.randomUUID();
     const agoraJob = new Date();
     const job = {
@@ -4105,6 +4255,8 @@ app.post("/dlh/downloads/massa", async (req, res) => {
       arquivo_zip_link: null,
       solicitado_por: req.auth?.user?.id || null,
       solicitado_email: req.auth?.user?.email || req.auth?.perfil?.email || null,
+      chave_deduplicacao: chaveDeduplicacao,
+      fila_posicao: downloadQueueDLH.length + 1,
       parametros: {
         modo: ids.length ? "ids" : "periodo",
         total_ids: ids.length,
@@ -4114,24 +4266,22 @@ app.post("/dlh/downloads/massa", async (req, res) => {
       },
       criado_em: agoraJob.toISOString(),
       atualizado_em: agoraJob.toISOString(),
-      expira_em: new Date(agoraJob.getTime() + 24 * 60 * 60 * 1000).toISOString()
+      expira_em: new Date(agoraJob.getTime() + DOWNLOAD_JOB_TTL_MS).toISOString()
     };
     downloadJobsDLH.set(jobId, job);
+    downloadFingerprintsDLH.set(chaveDeduplicacao, jobId);
     await salvarDownloadJobDLH(job);
 
-    setTimeout(() => {
-      processarDownloadMassaDLH(jobId, Array.isArray(registros) ? registros : []).catch(e => {
-        const job = downloadJobsDLH.get(jobId);
-        if (job) {
-          job.status = "erro";
-          job.erro = e.message;
-          job.atualizado_em = new Date().toISOString();
-          salvarDownloadJobDLH(job).catch(() => {});
-        }
-      });
-    }, 0);
+    enfileirarDownloadDLH(jobId, Array.isArray(registros) ? registros : []);
 
-    res.status(202).json({ job_id: jobId, total: registros.length });
+    res.status(202).json({
+      job_id: jobId,
+      total: registros.length,
+      fila_posicao: Number(job.fila_posicao || 0),
+      concorrencia_maxima: DOWNLOAD_MAX_CONCURRENT,
+      expira_em: job.expira_em,
+      reusado: false
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -4144,7 +4294,7 @@ app.get("/dlh/downloads/massa/historico", async (req, res) => {
     const solicitadoPor = role === "dev" || role === "administrador"
       ? null
       : req.auth?.user?.id;
-    const jobs = await listarDownloadJobsPersistidosDLH("DLH", limit, solicitadoPor);
+    const jobs = await listarHistoricoDownloadJobsDLH("DLH", limit, solicitadoPor);
     res.json({ jobs });
   } catch (e) {
     res.status(500).json({ erro: e.message });
