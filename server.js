@@ -1552,7 +1552,14 @@ function montarResultadoBuscaLista(registros, equipamentosInformados, campoEquip
 }
 
 function hojeIso() {
-  return new Date().toISOString().slice(0, 10);
+  const partes = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const valores = Object.fromEntries(partes.map(item => [item.type, item.value]));
+  return `${valores.year}-${valores.month}-${valores.day}`;
 }
 
 function adicionarDiasIso(dataIso, dias) {
@@ -2251,16 +2258,27 @@ function verificarValidade(dataISO) {
   if (!dataISO) return { valido: false, vencimento: null, mes_ano: null };
 
   const [ano, mes] = dataISO.split("-").map(Number);
-  const vencimentoDate = new Date(ano + 1, mes, 0);
-
-  const hoje = new Date();
-  hoje.setHours(0, 0, 0, 0);
+  const vencimentoDate = new Date(Date.UTC(ano + 1, mes, 0, 23, 59, 59, 999));
+  const hoje = hojeIso();
+  const vencimento = vencimentoDate.toISOString().slice(0, 10);
 
   return {
-    valido: hoje <= vencimentoDate,
-    vencimento: vencimentoDate.toISOString().split("T")[0],
+    valido: hoje <= vencimento,
+    vencimento,
     mes_ano: `${String(mes).padStart(2, "0")}/${ano + 1}`
   };
+}
+
+// A validade gravada no processamento fica congelada. Recalculamos na leitura
+// para que telas, filtros, dashboards e exportacoes reflitam o dia atual.
+function aplicarValidadeAtual(registros) {
+  if (!Array.isArray(registros)) return registros;
+  const hoje = hojeIso();
+  return registros.map((registro) => {
+    const vencimento = String(registro?.vencimento || registro?.data_vencimento || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vencimento)) return registro;
+    return { ...registro, validade: vencimento >= hoje };
+  });
 }
 
 function somenteNumeroBR(texto) {
@@ -3856,13 +3874,13 @@ app.get("/certificados", async (req, res) => {
     const offset = limitarNumero(req.query.offset, 0, 0, 1000000);
 
     if (listaEquipamentos.length) {
-      const data = await buscarCertificadosPorPeriodoEmLotes({
+      const data = aplicarValidadeAtual(await buscarCertificadosPorPeriodoEmLotes({
         tabela: "certificados",
         campoEquipamento: "dlt",
         equipamentos: listaEquipamentos,
         testeInicio,
         testeFim
-      });
+      }));
       return res.json({
         total: data.length,
         teste_inicio: testeInicio || null,
@@ -3893,7 +3911,7 @@ app.get("/certificados", async (req, res) => {
       `${SUPABASE_URL}/rest/v1/certificados?${params.toString()}`,
       { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
-    const data = validarListaSupabase(r, await r.json(), "Supabase certificados");
+    const data = aplicarValidadeAtual(validarListaSupabase(r, await r.json(), "Supabase certificados"));
     res.setHeader("Cache-Control", "private, max-age=30");
     res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || data.length), limit, offset, registros: data });
   } catch (e) {
@@ -3923,13 +3941,13 @@ app.post("/certificados/busca-lista", async (req, res) => {
         total_informado: unicos.length
       });
     }
-    const registros = await buscarCertificadosPorPeriodoEmLotes({
+    const registros = aplicarValidadeAtual(await buscarCertificadosPorPeriodoEmLotes({
       tabela: "certificados",
       campoEquipamento: "dlt",
       equipamentos: unicos,
       testeInicio,
       testeFim
-    });
+    }));
 
     res.setHeader("Cache-Control", "private, max-age=300");
     res.json({
@@ -3950,7 +3968,7 @@ app.get("/certificados/:id/detalhes", async (req, res) => {
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase detalhes do certificado");
+    const registros = aplicarValidadeAtual(validarListaSupabase(response, data, "Supabase detalhes do certificado"));
 
     if (!registros.length) {
       return res.status(404).json({ erro: "Certificado não encontrado" });
@@ -3978,7 +3996,7 @@ app.get("/divergentes", async (req, res) => {
       }
     );
 
-    const data = await r.json();
+    const data = aplicarValidadeAtual(await r.json());
     const contentRange = r.headers.get("content-range");
     const total = contentRange ? Number(contentRange.split("/")[1]) : data.length;
 
@@ -4063,13 +4081,13 @@ app.get("/assistente/resumo-lote", async (req, res) => {
       return res.status(400).json({ erro: "O limite e de 500 equipamentos por resumo", total_informado: unicos.length });
     }
 
-    const registros = await buscarCertificadosPorPeriodoEmLotes({
+    const registros = aplicarValidadeAtual(await buscarCertificadosPorPeriodoEmLotes({
       tabela: "certificados",
       campoEquipamento: "dlt",
       equipamentos: unicos,
       testeInicio,
       testeFim
-    });
+    }));
     const resumo = resumirCertificadosAssistente(registros);
     const riscos = montarRiscosAssistente({ ...resumo, modulo: "DLT" });
 
@@ -4259,7 +4277,7 @@ app.post("/loggers/checklist-pre-teste", async (req, res) => {
       return res.status(400).json({ erro: "Informe data inicial e final do teste" });
     }
 
-    const [status, certificados] = await Promise.all([
+    const [status, certificadosBrutos] = await Promise.all([
       buscarStatusAtualDLT(unicos),
       buscarCertificadosPorPeriodoEmLotes({
         tabela: "certificados",
@@ -4269,6 +4287,7 @@ app.post("/loggers/checklist-pre-teste", async (req, res) => {
         testeFim
       })
     ]);
+    const certificados = aplicarValidadeAtual(certificadosBrutos);
     const disponibilidade = combinarDisponibilidadeDLT(status.registros, { lista: unicos }).registros;
     const disponibilidadePorLogger = new Map(disponibilidade.map(item => [item.logger_codigo, item]));
     const certificadosPorLogger = new Map();
@@ -4527,19 +4546,19 @@ app.post("/downloads/massa", async (req, res) => {
     let registros = [];
 
     if (ids.length) {
-      registros = await buscarCertificadosPorIdsEmLotes(
+      registros = aplicarValidadeAtual(await buscarCertificadosPorIdsEmLotes(
         "certificados",
         "id,nome_original,nome_download,dlt,serie,data,vencimento",
         ids
-      );
+      ));
     } else if (listaEquipamentos.length && testeInicio && testeFim) {
-      registros = await buscarCertificadosPorPeriodoEmLotes({
+      registros = aplicarValidadeAtual(await buscarCertificadosPorPeriodoEmLotes({
         tabela: "certificados",
         campoEquipamento: "dlt",
         equipamentos: listaEquipamentos,
         testeInicio,
         testeFim
-      });
+      }));
     } else {
       return res.status(400).json({ erro: "Informe ids ou equipamentos + teste_inicio + teste_fim" });
     }
