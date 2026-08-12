@@ -942,14 +942,26 @@ function normalizarListaQuery(valor) {
 }
 
 function montarFiltroBuscaCertificado(termos, normalizador, campoEquipamento) {
-  const loggers = [...new Set(termos.map(normalizador).filter(Boolean))];
+  const loggers = new Set();
+  for (const termo of termos) {
+    const normalizado = normalizador(termo);
+    if (normalizado) loggers.add(normalizado);
+
+    // Bases antigas podem guardar o mesmo logger como "0163" ou "DLH-0163".
+    const numero = String(termo || "").replace(/\D/g, "");
+    if (numero) {
+      const codigo = numero.padStart(4, "0");
+      loggers.add(codigo);
+      loggers.add(`DLH-${codigo}`);
+    }
+  }
   const series = [...new Set(
     termos
       .map((valor) => String(valor || "").replace(/\D/g, ""))
       .filter(Boolean)
   )];
   const partes = [];
-  if (loggers.length) partes.push(`${campoEquipamento}.in.(${loggers.join(",")})`);
+  if (loggers.size) partes.push(`${campoEquipamento}.in.(${[...loggers].join(",")})`);
   if (series.length) partes.push(`serie.in.(${series.join(",")})`);
   return partes.length ? `(${partes.join(",")})` : "";
 }
