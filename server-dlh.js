@@ -936,9 +936,22 @@ function limparNomeArquivo(nome) {
 function normalizarListaQuery(valor) {
   if (Array.isArray(valor)) return valor.flatMap(normalizarListaQuery);
   return String(valor || "")
-    .split(/[;,\n]/)
+    .split(/[;,\s\n]+/)
     .map(v => v.trim())
     .filter(Boolean);
+}
+
+function montarFiltroBuscaCertificado(termos, normalizador, campoEquipamento) {
+  const loggers = [...new Set(termos.map(normalizador).filter(Boolean))];
+  const series = [...new Set(
+    termos
+      .map((valor) => String(valor || "").replace(/\D/g, ""))
+      .filter(Boolean)
+  )];
+  const partes = [];
+  if (loggers.length) partes.push(`${campoEquipamento}.in.(${loggers.join(",")})`);
+  if (series.length) partes.push(`serie.in.(${series.join(",")})`);
+  return partes.length ? `(${partes.join(",")})` : "";
 }
 
 function normalizarDataQuery(valor) {
@@ -3515,9 +3528,14 @@ app.get("/dlh/reprocess", async (req, res) => {
 
 app.get("/dlh/certificados", async (req, res) => {
   try {
-    const listaEquipamentos = normalizarListaQuery(req.query.equipamentos || req.query.dlh || req.query.lista);
+    // `equipamentos`/`lista` representam a busca explícita em lote.
+    // `dlh` é a busca normal da tela e também aceita vários loggers.
+    const listaEquipamentos = normalizarListaQuery(req.query.equipamentos || req.query.lista);
+    const buscaDlh = normalizarListaQuery(req.query.dlh);
     const testeInicio = normalizarDataQuery(req.query.teste_inicio || req.query.data_inicio || req.query.inicio);
     const testeFim = normalizarDataQuery(req.query.teste_fim || req.query.data_fim || req.query.fim);
+    const limit = limitarNumero(req.query.limit, 100, 1, 1000);
+    const offset = limitarNumero(req.query.offset, 0, 0, 1000000);
 
     if (listaEquipamentos.length) {
       const data = await buscarCertificadosPorPeriodoEmLotes({
@@ -3535,15 +3553,31 @@ app.get("/dlh/certificados", async (req, res) => {
       });
     }
 
-    const limit = Number(req.query.limit || 100);
-    const offset = Number(req.query.offset || 0);
+    const filtros = [];
+    if (buscaDlh.length) {
+      const filtroBusca = montarFiltroBuscaCertificado(buscaDlh, normalizarDLH, "dlh");
+      if (filtroBusca) filtros.push(["or", filtroBusca]);
+    }
+    if (testeInicio && testeFim) {
+      filtros.push(["data", `lte.${testeFim}`], ["vencimento", `gte.${testeInicio}`]);
+    } else if (testeInicio || testeFim) {
+      return res.status(400).json({ erro: "Informe data inicial e data final do teste, ou deixe as duas em branco" });
+    }
+
+    const params = new URLSearchParams();
+    params.set("select", CERTIFICADOS_DLH_LISTA_SELECT);
+    for (const [chave, valor] of filtros) params.append(chave, valor);
+    params.append("order", "data.desc");
+    params.append("order", "id.asc");
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?select=${CERTIFICADOS_DLH_LISTA_SELECT}&order=data.desc&limit=${limit}&offset=${offset}`,
+      `${SUPABASE_URL}/rest/v1/certificados_dlh?${params.toString()}`,
       { headers: { ...supabaseHeaders(), Prefer: "count=exact" } }
     );
-    const data = await r.json();
+    const data = validarListaSupabase(r, await r.json(), "Supabase certificados_dlh");
     res.setHeader("Cache-Control", "private, max-age=30");
-    res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || 0), registros: data });
+    res.json({ total: Number(r.headers.get("content-range")?.split("/")[1] || data.length), limit, offset, registros: data });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
