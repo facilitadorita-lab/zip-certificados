@@ -1047,6 +1047,12 @@ function normalizarListaQuery(valor) {
     .filter(Boolean);
 }
 
+// As tabelas guardam o código cru (ex.: 0165); o prefixo DLH- é apenas de apresentação.
+function normalizarCodigoEquipamentoBanco(valor) {
+  const numero = String(valor ?? "").replace(/\D/g, "");
+  return numero ? numero.padStart(4, "0") : null;
+}
+
 function montarFiltroBuscaCertificado(termos, normalizador, campoEquipamento) {
   const loggers = new Set();
   for (const termo of termos) {
@@ -1112,7 +1118,7 @@ async function buscarCertificadosPorPeriodoEmLotes({
 
   const normalizados = [...new Set(
     equipamentos
-      .map(normalizarDLH)
+      .map(normalizarCodigoEquipamentoBanco)
       .filter(Boolean)
   )];
 
