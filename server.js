@@ -4336,28 +4336,204 @@ app.post("/assistente/chamado-calibracao", async (req, res) => {
   }
 });
 
+function normalizarTextoAssistenteDLT(valor) {
+  return String(valor || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function extrairCodigosPerguntaAssistenteDLT(pergunta) {
+  const texto = String(pergunta || "");
+  const encontrados = [];
+  const rotulados = /(?:dlt|logger(?:s)?|equipamento(?:s)?|tag)\s*(?:-|:)?\s*(\d{1,5})/gi;
+  for (const match of texto.matchAll(rotulados)) encontrados.push(match[1]);
+  for (const match of texto.matchAll(/\b\d{4}\b/g)) {
+    const numero = Number(match[0]);
+    if (numero < 1900 || numero > 2100) encontrados.push(match[0]);
+  }
+  return [...new Set(encontrados.map(normalizarCodigoEquipamentoBanco).filter(Boolean))].slice(0, 100);
+}
+
+function formatarDataAssistenteDLT(valor) {
+  const texto = String(valor || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(texto)) return null;
+  const [ano, mes, dia] = texto.split("-");
+  return `${dia}/${mes}/${ano}`;
+}
+
+function montarAcoesAssistenteDLT(equipamentos = [], tipo = "") {
+  const acoes = [];
+  if (equipamentos.length) {
+    acoes.push({
+      id: "abrir-certificados",
+      label: "Abrir certificados",
+      tipo: "navegacao",
+      rota: "/certificados",
+      filtros: { dlt: equipamentos.join(",") }
+    });
+  }
+  if (tipo !== "divergencias") {
+    acoes.push({ id: "abrir-divergencias", label: "Ver divergencias", tipo: "navegacao", rota: "/divergentes" });
+  }
+  acoes.push({ id: "abrir-historico", label: "Historico de loggers", tipo: "navegacao", rota: "/movimentacao-loggers" });
+  acoes.push({ id: "abrir-relatorio", label: "Relatorio do periodo", tipo: "navegacao", rota: "/relatorios" });
+  return acoes;
+}
+
+function intervaloVencimentoAssistenteDLT(texto) {
+  const hoje = hojeIso();
+  const em30 = adicionarDiasIso(hoje, 30);
+  const em60 = adicionarDiasIso(hoje, 60);
+  if (/vencid/.test(texto)) {
+    return { titulo: "Certificados vencidos", filtros: [["vencimento", `lt.${hoje}`]] };
+  }
+  if (/31\s*(a|ate|-)\s*60|31.*60/.test(texto)) {
+    return {
+      titulo: "Certificados que vencem entre 31 e 60 dias",
+      filtros: [["vencimento", `gt.${em30}`], ["vencimento", `lte.${em60}`]]
+    };
+  }
+  if (/30|trinta/.test(texto)) {
+    return {
+      titulo: "Certificados que vencem em ate 30 dias",
+      filtros: [["vencimento", `gte.${hoje}`], ["vencimento", `lte.${em30}`]]
+    };
+  }
+  return {
+    titulo: "Certificados com vencimento nos proximos 60 dias",
+    filtros: [["vencimento", `gte.${hoje}`], ["vencimento", `lte.${em60}`]]
+  };
+}
+
+async function interpretarPerguntaAssistenteDLT(pergunta) {
+  const texto = normalizarTextoAssistenteDLT(pergunta);
+  const equipamentos = extrairCodigosPerguntaAssistenteDLT(pergunta);
+  const acoes = montarAcoesAssistenteDLT(equipamentos);
+
+  if (/validade|vence.*ultimo|regra.*certificado|um ano|1 ano|intersecao|periodo do teste/.test(texto)) {
+    return {
+      tipo: "explicacao_validade",
+      resposta: "A validade do certificado e de um ano. O vencimento ocorre no ultimo dia do mes da calibracao, no ano seguinte. Para um teste, o certificado entra quando os periodos se sobrepoem: certificado.data <= teste_fim e certificado.vencimento >= teste_inicio.",
+      regra: {
+        titulo: "Regra aplicada",
+        itens: [
+          "Validade de um ano a partir da calibracao.",
+          "Vencimento no ultimo dia do mesmo mes do ano seguinte.",
+          "Filtros de teste usam intersecao de periodos, nao apenas a data da calibracao."
+        ]
+      },
+      acoes
+    };
+  }
+
+  if (/diverg|reprov|erro.*cert|cert.*erro/.test(texto)) {
+    const { total, registros } = await buscarRegistrosAssistente(
+      "certificados",
+      CERTIFICADOS_LISTA_SELECT,
+      [["or", "(divergente.eq.true,motivo_divergencia.not.is.null,status.eq.REPROVADO,status.eq.ERRO)"]],
+      { order: "data.desc", limit: 100, count: true }
+    );
+    const analisados = registros.map(item => ({
+      ...item,
+      logger: item.dlt,
+      analise: explicarDivergenciaCertificado(item)
+    }));
+    return {
+      tipo: "divergencias",
+      resposta: total
+        ? `Encontrei ${total} certificado(s) com divergencia, reprovacao ou erro. A analise abaixo explica o motivo e a acao recomendada.`
+        : "Nao encontrei divergencias, reprovacoes ou erros na base DLT.",
+      total_registros: total,
+      registros: analisados,
+      acoes: montarAcoesAssistenteDLT(equipamentos, "divergencias")
+    };
+  }
+
+  if (/vencid|vencimento|vencem|proximos?\s+(30|60)|dias/.test(texto)) {
+    const intervalo = intervaloVencimentoAssistenteDLT(texto);
+    const { total, registros } = await buscarRegistrosAssistente(
+      "certificados",
+      CERTIFICADOS_LISTA_SELECT,
+      intervalo.filtros,
+      { order: "vencimento.asc", limit: 100, count: true }
+    );
+    return {
+      tipo: "vencimentos",
+      resposta: total ? `${intervalo.titulo}: ${total} certificado(s) encontrado(s).` : `Nao encontrei certificados em ${intervalo.titulo.toLowerCase()}.`,
+      total_registros: total,
+      registros,
+      filtros_sugeridos: { vencimento: intervalo.titulo },
+      acoes
+    };
+  }
+
+  if (equipamentos.length) {
+    const registros = await buscarCertificadosPorPeriodoEmLotes({
+      tabela: "certificados",
+      campoEquipamento: "dlt",
+      equipamentos,
+      testeInicio: null,
+      testeFim: null
+    });
+    const encontrados = new Set(registros.map(item => normalizarDLT(item.dlt)).filter(Boolean));
+    const naoEncontrados = equipamentos.filter(item => !encontrados.has(item));
+    const status = await buscarStatusAtualDLT(equipamentos);
+    return {
+      tipo: /histor/.test(texto) ? "historico_logger" : "busca_equipamentos",
+      resposta: registros.length
+        ? `Encontrei ${registros.length} certificado(s) para ${equipamentos.length} logger(s). O resultado inclui o historico de certificados, ordenado do mais recente para o mais antigo.`
+        : "Nao encontrei certificados para os logger(s) informados.",
+      total_registros: registros.length,
+      registros,
+      localizacoes: status.registros,
+      encontrados: [...encontrados],
+      nao_encontrados: naoEncontrados,
+      filtros_sugeridos: { dlt: equipamentos },
+      endpoint_sugerido: `/certificados?equipamentos=${equipamentos.join(",")}`,
+      acoes
+    };
+  }
+
+  if (/cliente|fora.*empresa|manut|calibr|onde.*logger|localiza/.test(texto)) {
+    const status = await buscarStatusAtualDLT([]);
+    const clienteBusca = texto.match(/\bcliente(?:s)?\s*(?:da|do|:)?\s+([a-z0-9][a-z0-9 ._-]{1,40})/)?.[1]?.trim() || "";
+    const registros = status.registros.filter(item => {
+      const local = normalizarTextoAssistenteDLT(item.local_atual);
+      const cliente = normalizarTextoAssistenteDLT(item.cliente);
+      if (clienteBusca && !cliente.includes(clienteBusca)) return false;
+      if (/fora.*empresa|cliente/.test(texto)) return !localEhAreaTecnica(item.local_atual);
+      if (/manut|calibr/.test(texto)) return localEhManutencao(item.local_atual);
+      return true;
+    });
+    return {
+      tipo: "localizacao_loggers",
+      resposta: registros.length
+        ? `Encontrei ${registros.length} logger(s) na consulta de localizacao atual.`
+        : "Nao encontrei logger(s) para a localizacao ou cliente informado.",
+      total_registros: registros.length,
+      registros,
+      aviso: status.aviso,
+      acoes: montarAcoesAssistenteDLT()
+    };
+  }
+
+  const resumo = await montarResumoModuloDLT();
+  const riscos = montarRiscosAssistente(resumo);
+  return {
+    tipo: "resumo_operacional",
+    resposta: montarMensagemExecutiva(resumo, riscos).leitura_gerencial,
+    resumo,
+    riscos,
+    acoes
+  };
+}
+
 app.post("/assistente/perguntar", async (req, res) => {
   try {
     const pergunta = String(req.body?.pergunta || req.body?.mensagem || "").trim();
-    const lista = normalizarListaQuery(pergunta).map(normalizarDLT).filter(Boolean);
-    const resumo = await montarResumoModuloDLT();
-    const riscos = montarRiscosAssistente(resumo);
-
-    if (lista.length) {
-      return res.json({
-        tipo: "busca_equipamentos",
-        resposta: `Encontrei ${lista.length} codigo(s) de logger na pergunta. Use a busca por lista para trazer todos os certificados relacionados.`,
-        filtros_sugeridos: { dlt: lista },
-        endpoint_sugerido: `/certificados?equipamentos=${lista.join(",")}`
-      });
-    }
-
-    res.json({
-      tipo: "resumo_operacional",
-      resposta: montarMensagemExecutiva(resumo, riscos).leitura_gerencial,
-      resumo,
-      riscos
-    });
+    res.json(await interpretarPerguntaAssistenteDLT(pergunta));
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
