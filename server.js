@@ -61,6 +61,12 @@ app.use((req, _res, next) => {
 const PORT = Number(process.env.PORT || 3000);
 const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
+// A chave administrativa fica somente no Render. Mantemos SUPABASE_KEY como
+// fallback para não quebrar instalações existentes que já usam a service key.
+const SUPABASE_ADMIN_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  SUPABASE_KEY;
 const FOLDER_ID = process.env.FOLDER_ID || "";
 const REPORTS_FOLDER_ID = process.env.REPORTS_FOLDER_ID || "";
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
@@ -84,7 +90,8 @@ const METRICS_RETENTION_DAYS = Number(process.env.METRICS_RETENTION_DAYS || 90);
 const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
-const INVITE_REDIRECT_URL = process.env.INVITE_REDIRECT_URL || "";
+const INVITE_REDIRECT_URL =
+  process.env.INVITE_REDIRECT_URL || "https://www.calibraflow.com/definir-senha";
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
 const BACKEND_VERSION = "assistente-backend-2026-07-23";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
@@ -128,8 +135,8 @@ const authCache = new Map();
 const profileCache = new Map();
 
 const supabaseAdmin =
-  SUPABASE_URL && SUPABASE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+  SUPABASE_URL && SUPABASE_ADMIN_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ADMIN_KEY, {
         auth: { persistSession: false, autoRefreshToken: false }
       })
     : null;
@@ -254,13 +261,13 @@ const drive = googleAuth ? google.drive({ version: "v3", auth: googleAuth }) : n
 // =========================
 function supabaseHeaders() {
   const headers = {
-    apikey: SUPABASE_KEY,
+    apikey: SUPABASE_ADMIN_KEY,
     "Content-Type": "application/json"
   };
 
   // Somente chaves antigas JWT usam Bearer
-  if (SUPABASE_KEY.split(".").length === 3) {
-    headers.Authorization = `Bearer ${SUPABASE_KEY}`;
+  if (SUPABASE_ADMIN_KEY.split(".").length === 3) {
+    headers.Authorization = `Bearer ${SUPABASE_ADMIN_KEY}`;
   }
 
   return headers;
@@ -388,8 +395,9 @@ app.use(async (req, res, next) => {
     req.method === "GET" &&
     /^\/downloads\/massa\/[^/]+\/arquivo$/.test(req.path) &&
     Boolean(req.query?.ticket);
+  const rotaUsuarios = req.path === "/usuarios" || req.path.startsWith("/usuarios/");
   if (
-    !AUTH_ENABLED ||
+    (!AUTH_ENABLED && !rotaUsuarios) ||
     req.method === "OPTIONS" ||
     req.path === "/" ||
     req.path === "/versao" ||
@@ -3708,14 +3716,17 @@ app.get("/usuarios", async (req, res) => {
 
 app.post("/usuarios/convidar", async (req, res) => {
   try {
-    if (!supabaseAdmin) throw new Error("Supabase Auth não configurado");
+    if (!supabaseAdmin) {
+      return res.status(503).json({ erro: "Serviço de convites indisponível no momento" });
+    }
 
     const email = String(req.body?.email || "").trim().toLowerCase();
-    const nome = String(req.body?.nome || "").trim();
-    const role = String(req.body?.role || "usuario").trim();
+    const nome = String(req.body?.nome || "").trim().slice(0, 120);
+    const role = String(req.body?.role || "usuario").trim().toLowerCase();
     const rolesValidas = ["dev", "administrador", "usuario", "auditor"];
+    const emailValido = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 
-    if (!email || !email.includes("@")) {
+    if (!emailValido) {
       return res.status(400).json({ erro: "Informe um e-mail válido" });
     }
     if (!rolesValidas.includes(role)) {
@@ -3731,15 +3742,57 @@ app.post("/usuarios/convidar", async (req, res) => {
     if (INVITE_REDIRECT_URL) options.redirectTo = INVITE_REDIRECT_URL;
 
     const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, options);
-    if (error) return res.status(400).json({ erro: error.message });
+    if (error) {
+      const detalhe = String(error.message || "").toLowerCase();
+      if (
+        detalhe.includes("already") ||
+        detalhe.includes("registered") ||
+        detalhe.includes("exists")
+      ) {
+        return res.status(409).json({ erro: "Este e-mail já está cadastrado ou possui um convite ativo" });
+      }
+      return res.status(400).json({ erro: "Não foi possível enviar o convite" });
+    }
+
+    const usuarioConvidado = data?.user;
+    if (!usuarioConvidado?.id) {
+      return res.status(502).json({ erro: "O convite não retornou um usuário válido" });
+    }
+
+    const { error: perfilError } = await supabaseAdmin
+      .from("profiles")
+      .upsert(
+        {
+          id: usuarioConvidado.id,
+          email,
+          nome: nome || email.split("@")[0],
+          role,
+          ativo: true,
+          aprovado: false
+        },
+        { onConflict: "id" }
+      );
+
+    if (perfilError) {
+      console.error("Falha ao criar perfil pendente do convite:", perfilError.message);
+      return res.status(500).json({ erro: "Convite enviado, mas não foi possível preparar o perfil" });
+    }
 
     res.status(201).json({
       sucesso: true,
-      mensagem: "Convite enviado",
-      usuario: { id: data.user?.id, email, nome, role }
+      mensagem: "Convite enviado. O acesso ficará pendente até aprovação.",
+      usuario: {
+        id: usuarioConvidado.id,
+        email,
+        nome: nome || email.split("@")[0],
+        role,
+        ativo: true,
+        aprovado: false
+      }
     });
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    console.error("Falha ao convidar usuário:", e?.message || e);
+    res.status(500).json({ erro: "Não foi possível concluir o convite" });
   }
 });
 
