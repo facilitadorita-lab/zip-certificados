@@ -3702,13 +3702,49 @@ app.post("/automacao/sincronizar", async (req, res) => {
 app.get("/usuarios", async (req, res) => {
   try {
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,aprovado,criado_em,ultimo_acesso&order=criado_em.desc`,
+      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,aprovado`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
-    const registros = validarListaSupabase(response, data, "Supabase usuários");
+    const perfis = validarListaSupabase(response, data, "Supabase usuários");
+    const porId = new Map(perfis.map((perfil) => [String(perfil.id), perfil]));
+
+    // O convite já cria o perfil. A união com Auth também torna visível uma
+    // conta que foi criada, mas ainda não possui uma linha em public.profiles,
+    // mantendo-a pendente e sem conceder permissões por padrão.
+    if (supabaseAdmin) {
+      const { data: authData, error: authError } = await supabaseAdmin.auth.admin.listUsers({
+        page: 1,
+        perPage: 1000
+      });
+      if (authError) {
+        console.warn("Não foi possível complementar usuários pelo Supabase Auth:", authError.message);
+      } else {
+        for (const usuario of authData?.users || []) {
+          const id = String(usuario.id);
+          if (porId.has(id)) continue;
+          const email = String(usuario.email || "");
+          porId.set(id, {
+            id,
+            email,
+            nome: usuario.user_metadata?.nome || email.split("@")[0] || "Usuário",
+            role: "usuario",
+            ativo: false,
+            aprovado: false,
+            created_at: usuario.created_at || undefined,
+            last_sign_in_at: usuario.last_sign_in_at || null
+          });
+        }
+      }
+    }
+
+    const registros = [...porId.values()].sort((a, b) => {
+      const dataA = Date.parse(a.criado_em || a.created_at || "") || 0;
+      const dataB = Date.parse(b.criado_em || b.created_at || "") || 0;
+      return dataB - dataA;
+    });
     res.setHeader("Cache-Control", "no-store");
-    res.json({ total: registros.length, registros });
+    res.json({ total: registros.length, registros, usuarios: registros });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
@@ -3723,7 +3759,7 @@ app.post("/usuarios/convidar", async (req, res) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const nome = String(req.body?.nome || "").trim().slice(0, 120);
     const role = String(req.body?.role || "usuario").trim().toLowerCase();
-    const rolesValidas = ["dev", "administrador", "usuario", "auditor"];
+    const rolesValidas = ["administrador", "usuario"];
     const emailValido = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 
     if (!emailValido) {
@@ -3732,10 +3768,6 @@ app.post("/usuarios/convidar", async (req, res) => {
     if (!rolesValidas.includes(role)) {
       return res.status(400).json({ erro: "Perfil de acesso inválido" });
     }
-    if (req.auth.perfil.role !== "dev" && role === "dev") {
-      return res.status(403).json({ erro: "Somente DEV pode convidar outro DEV" });
-    }
-
     const options = {
       data: { nome: nome || email.split("@")[0], role }
     };
