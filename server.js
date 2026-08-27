@@ -3768,7 +3768,7 @@ app.post("/usuarios/convidar", async (req, res) => {
           nome: nome || email.split("@")[0],
           role,
           ativo: true,
-          aprovado: false
+          aprovado: true
         },
         { onConflict: "id" }
       );
@@ -3780,14 +3780,14 @@ app.post("/usuarios/convidar", async (req, res) => {
 
     res.status(201).json({
       sucesso: true,
-      mensagem: "Convite enviado. O acesso ficará pendente até aprovação.",
+      mensagem: "Convite enviado. A conta já está aprovada e ficará disponível após a definição da senha.",
       usuario: {
         id: usuarioConvidado.id,
         email,
         nome: nome || email.split("@")[0],
         role,
         ativo: true,
-        aprovado: false
+        aprovado: true
       }
     });
   } catch (e) {
