@@ -1932,6 +1932,45 @@ function montarMensagemExecutiva(resumo, riscos) {
   };
 }
 
+const assistentePerguntaCache = new Map();
+const ASSISTENTE_PERGUNTA_CACHE_TTL_MS = 30 * 1000;
+
+function chaveCachePerguntaAssistente(modulo, pergunta) {
+  return `${modulo}:${String(pergunta || "").trim().toLowerCase()}`;
+}
+
+async function perguntarComCacheAssistente(modulo, pergunta, executor) {
+  const chave = chaveCachePerguntaAssistente(modulo, pergunta);
+  const existente = assistentePerguntaCache.get(chave);
+
+  if (existente) {
+    if (existente.data && Date.now() - existente.at < ASSISTENTE_PERGUNTA_CACHE_TTL_MS) {
+      return existente.data;
+    }
+    if (existente.promise) return existente.promise;
+    assistentePerguntaCache.delete(chave);
+  }
+
+  const promise = executor();
+  assistentePerguntaCache.set(chave, { at: Date.now(), promise });
+
+  if (assistentePerguntaCache.size > 100) {
+    const primeiraChave = assistentePerguntaCache.keys().next().value;
+    if (primeiraChave) assistentePerguntaCache.delete(primeiraChave);
+  }
+
+  try {
+    const data = await promise;
+    assistentePerguntaCache.set(chave, { at: Date.now(), data });
+    return data;
+  } catch (error) {
+    if (assistentePerguntaCache.get(chave)?.promise === promise) {
+      assistentePerguntaCache.delete(chave);
+    }
+    throw error;
+  }
+}
+
 async function buscarCertificadoAssistente(id) {
   const response = await fetch(
     `${SUPABASE_URL}/rest/v1/certificados?id=eq.${encodeURIComponent(id)}&select=${CERTIFICADOS_LISTA_SELECT},pontos&limit=1`,
@@ -4618,7 +4657,12 @@ async function interpretarPerguntaAssistenteDLT(pergunta) {
 app.post("/assistente/perguntar", async (req, res) => {
   try {
     const pergunta = String(req.body?.pergunta || req.body?.mensagem || "").trim();
-    res.json(await interpretarPerguntaAssistenteDLT(pergunta));
+    const resposta = await perguntarComCacheAssistente(
+      "DLT",
+      pergunta,
+      () => interpretarPerguntaAssistenteDLT(pergunta)
+    );
+    res.json(resposta);
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
