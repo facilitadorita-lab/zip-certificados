@@ -283,6 +283,37 @@ function limparCachesAuth() {
   }
 }
 
+async function buscarUsuarioAuthPorEmail(email) {
+  if (!supabaseAdmin) return null;
+
+  const emailNormalizado = String(email || "").trim().toLowerCase();
+  const perPage = 1000;
+  for (let page = 1; page <= 10; page++) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (error) throw error;
+
+    const usuarios = data?.users || [];
+    const encontrado = usuarios.find(
+      usuario => String(usuario.email || "").trim().toLowerCase() === emailNormalizado
+    );
+    if (encontrado) return encontrado;
+    if (usuarios.length < perPage) break;
+  }
+
+  return null;
+}
+
+function usuarioJaDefiniuSenha(usuario) {
+  const metadata = usuario?.user_metadata || {};
+  return Boolean(
+    metadata.senha_definida === true ||
+    metadata.senha_definida === "true" ||
+    metadata.cadastro_concluido === true ||
+    metadata.cadastro_concluido === "true" ||
+    usuario?.last_sign_in_at
+  );
+}
+
 async function buscarPerfilUsuario(user) {
   const cache = profileCache.get(user.id);
   if (cache?.expiraEm > Date.now()) return cache.valor;
@@ -3807,6 +3838,29 @@ app.post("/usuarios/convidar", async (req, res) => {
     if (!rolesValidas.includes(role)) {
       return res.status(400).json({ erro: "Perfil de acesso inválido" });
     }
+
+    const usuarioExistente = await buscarUsuarioAuthPorEmail(email);
+    if (usuarioExistente && usuarioJaDefiniuSenha(usuarioExistente)) {
+      return res.status(409).json({
+        erro: "Este usuário já definiu a senha e está ativo. Não é necessário enviar outro convite."
+      });
+    }
+
+    // O Auth não possui uma operação de reenvio de convite para um usuário
+    // pendente. Removemos somente a identidade ainda não concluída e criamos
+    // outra, fazendo o Supabase disparar um novo convite com o mesmo template.
+    let conviteReenviado = false;
+    if (usuarioExistente) {
+      const { error: removerError } = await supabaseAdmin.auth.admin.deleteUser(usuarioExistente.id);
+      if (removerError) {
+        console.error("Falha ao renovar convite pendente:", removerError.message);
+        return res.status(409).json({
+          erro: "Não foi possível renovar o convite pendente. Tente novamente em instantes."
+        });
+      }
+      conviteReenviado = true;
+    }
+
     const options = {
       data: { nome: nome || email.split("@")[0], role }
     };
@@ -3814,14 +3868,7 @@ app.post("/usuarios/convidar", async (req, res) => {
 
     const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, options);
     if (error) {
-      const detalhe = String(error.message || "").toLowerCase();
-      if (
-        detalhe.includes("already") ||
-        detalhe.includes("registered") ||
-        detalhe.includes("exists")
-      ) {
-        return res.status(409).json({ erro: "Este e-mail já está cadastrado ou possui um convite ativo" });
-      }
+      console.error("Falha ao enviar convite:", error.message);
       return res.status(400).json({ erro: "Não foi possível enviar o convite" });
     }
 
@@ -3851,7 +3898,10 @@ app.post("/usuarios/convidar", async (req, res) => {
 
     res.status(201).json({
       sucesso: true,
-      mensagem: "Convite enviado. A conta já está aprovada e ficará disponível após a definição da senha.",
+      reenviado: conviteReenviado,
+      mensagem: conviteReenviado
+        ? "Novo convite enviado. A conta permanece aprovada e ficará disponível após a definição da senha."
+        : "Convite enviado. A conta já está aprovada e ficará disponível após a definição da senha.",
       usuario: {
         id: usuarioConvidado.id,
         email,
