@@ -2325,6 +2325,129 @@ function extrairMetadadosDLH(texto) {
 // =========================
 // EXTRAÇÃO TABELA DLH
 // =========================
+function normalizarTituloTabelaDLH(textoLinha) {
+  return String(textoLinha || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function identificarModoTabelaDLH(textoLinha) {
+  const titulo = normalizarTituloTabelaDLH(textoLinha);
+  if (
+    titulo.includes("UMIDADE") ||
+    titulo.includes("HUMIDADE") ||
+    (titulo.includes("TESTE") && /U\s*\.?\s*R/.test(titulo))
+  ) {
+    return "UMIDADE";
+  }
+
+  if (
+    titulo.includes("TEMPERATURA") ||
+    (titulo.includes("TESTE") && (/[º°]?\s*C\b/.test(titulo) || /\bOC\b/.test(titulo)))
+  ) {
+    return "TEMPERATURA";
+  }
+
+  return "";
+}
+
+// Segundo leitor para certificados do layout Escala, nos quais a tabela
+// aparece como colunas posicionadas e não possui os títulos do formato atual.
+function extrairTabelaDLHEscala(linhas) {
+  const padroesUmidade = [10, 50, 90];
+  const padroesTemperatura = [-20, 0, 15, 60];
+  const pontosUmidade = [];
+  const pontosTemperatura = [];
+
+  const numerosDaLinhaEscala = linha => (linha?.items || [])
+    .filter(item => somenteNumeroBR(item.text))
+    .sort((a, b) => a.x - b.x)
+    .map(item => ({ ...item, valor: parseBR(item.text) }))
+    .filter(item => Number.isFinite(item.valor));
+
+  const tentarPonto = (numeros, padroes, indice, tipo) => {
+    const padraoEsperado = padroes[indice];
+    if (!Number.isFinite(padraoEsperado) || numeros.length < 4) return null;
+
+    // Procura a sequência indicado | padrão | erro | incerteza.
+    // O primeiro número pode ser a profundidade ou o índice do ponto.
+    for (let inicio = 0; inicio <= numeros.length - 4; inicio++) {
+      const indicado = numeros[inicio]?.valor;
+      const padrao = numeros[inicio + 1]?.valor;
+      const erro = numeros[inicio + 2]?.valor;
+      const incerteza = numeros[inicio + 3]?.valor;
+
+      if (Math.abs(padrao - padraoEsperado) > 1.5) continue;
+
+      const faixaIndicada = tipo === "UMIDADE"
+        ? indicado >= 0 && indicado <= 100
+        : indicado >= -40 && indicado <= 80;
+      const faixaErro = tipo === "UMIDADE" ? 20 : 5;
+
+      if (
+        !faixaIndicada ||
+        Math.abs(erro) > faixaErro ||
+        Math.abs(incerteza) > 10 ||
+        Math.abs((indicado - padrao) - erro) > 1.5
+      ) {
+        continue;
+      }
+
+      return {
+        ponto: indice + 1,
+        indicado: fmt2(indicado),
+        padrao: fmt2(padrao),
+        erro: fmt2(erro),
+        incerteza: fmt2(Math.abs(incerteza)),
+        soma: fmt2(Math.abs(erro) + Math.abs(incerteza))
+      };
+    }
+
+    return null;
+  };
+
+  for (const linha of linhas || []) {
+    const numeros = numerosDaLinhaEscala(linha);
+    if (pontosUmidade.length < padroesUmidade.length) {
+      const pontoUmidade = tentarPonto(
+        numeros,
+        padroesUmidade,
+        pontosUmidade.length,
+        "UMIDADE"
+      );
+      if (pontoUmidade) pontosUmidade.push(pontoUmidade);
+    }
+
+    if (pontosTemperatura.length < padroesTemperatura.length) {
+      const pontoTemperatura = tentarPonto(
+        numeros,
+        padroesTemperatura,
+        pontosTemperatura.length,
+        "TEMPERATURA"
+      );
+      if (pontoTemperatura) pontosTemperatura.push(pontoTemperatura);
+    }
+  }
+
+  const ok = pontosUmidade.length >= padroesUmidade.length &&
+    pontosTemperatura.length >= padroesTemperatura.length;
+
+  return {
+    ok,
+    pontos_umidade: pontosUmidade,
+    pontos_temperatura: pontosTemperatura,
+    debug: {
+      parser: "escala_layout",
+      motivo: "Formato alternativo por colunas posicionadas",
+      umidade_encontrada: pontosUmidade.length,
+      temperatura_encontrada: pontosTemperatura.length
+    }
+  };
+}
+
 async function extrairTabelaDLH(buffer) {
   const { texto, linhas } = await extrairTextoELinhasDoPDF(buffer);
 
@@ -2344,35 +2467,6 @@ async function extrairTabelaDLH(buffer) {
     return (String(textoLinha || "").match(/-?\d+(?:[,.]\d+)?/g) || [])
       .map(v => parseBR(v))
       .filter(v => !Number.isNaN(v));
-  }
-
-  function normalizarTituloTabela(textoLinha) {
-    return String(textoLinha || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toUpperCase()
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  function identificarModoTabela(textoLinha) {
-    const titulo = normalizarTituloTabela(textoLinha);
-    if (
-      titulo.includes("UMIDADE") ||
-      titulo.includes("HUMIDADE") ||
-      (titulo.includes("TESTE") && /U\s*\.?\s*R/.test(titulo))
-    ) {
-      return "UMIDADE";
-    }
-
-    if (
-      titulo.includes("TEMPERATURA") ||
-      (titulo.includes("TESTE") && (/[º°]?\s*C\b/.test(titulo) || /\bOC\b/.test(titulo)))
-    ) {
-      return "TEMPERATURA";
-    }
-
-    return "";
   }
 
   function adicionarUmidade(valores) {
@@ -2485,13 +2579,13 @@ async function extrairTabelaDLH(buffer) {
   let modo = "";
 
   for (const linha of textoLinhas) {
-    const novoModo = identificarModoTabela(linha);
+    const novoModo = identificarModoTabelaDLH(linha);
     if (novoModo) {
       modo = novoModo;
       continue;
     }
 
-    const upper = normalizarTituloTabela(linha);
+    const upper = normalizarTituloTabelaDLH(linha);
 
     if (
       upper.includes("A INCERTEZA") ||
@@ -2597,13 +2691,13 @@ async function extrairTabelaDLH(buffer) {
 
     for (const linha of linhas) {
       const linhaTexto = String(linha.texto || "");
-      const novoModo = identificarModoTabela(linhaTexto);
+      const novoModo = identificarModoTabelaDLH(linhaTexto);
       if (novoModo) {
         modoLinha = novoModo;
         continue;
       }
 
-      const upper = normalizarTituloTabela(linhaTexto);
+      const upper = normalizarTituloTabelaDLH(linhaTexto);
 
       if (
         upper.includes("A INCERTEZA") ||
@@ -2638,14 +2732,22 @@ async function extrairTabelaDLH(buffer) {
   }
 
   if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
+    const alternativa = extrairTabelaDLHEscala(linhas);
+    if (alternativa.ok) return alternativa;
+
+    const umidadeAlternativa = Number(alternativa.debug?.umidade_encontrada || 0);
+    const temperaturaAlternativa = Number(alternativa.debug?.temperatura_encontrada || 0);
+
     return {
       ok: false,
       pontos_umidade: pontosUmidade,
       pontos_temperatura: pontosTemperatura,
       debug: {
+        parser: "principal+escala_layout",
         motivo: "Quantidade insuficiente de pontos DLH",
-        umidade_encontrada: pontosUmidade.length,
-        temperatura_encontrada: pontosTemperatura.length,
+        umidade_encontrada: Math.max(pontosUmidade.length, umidadeAlternativa),
+        temperatura_encontrada: Math.max(pontosTemperatura.length, temperaturaAlternativa),
+        alternativa,
         texto: textoCompleto,
         linhas: linhas.map(l => l.texto)
       }
