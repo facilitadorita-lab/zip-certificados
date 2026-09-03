@@ -92,7 +92,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03-pdf-layout";
+const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v2";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -2359,8 +2359,6 @@ function identificarModoTabelaDLH(textoLinha) {
 function extrairTabelaDLHEscala(linhas) {
   const padroesUmidade = [10, 50, 90];
   const padroesTemperatura = [-20, 0, 15, 60];
-  const pontosUmidade = [];
-  const pontosTemperatura = [];
 
   const numerosDaLinhaEscala = linha => (linha?.items || [])
     .filter(item => somenteNumeroBR(item.text))
@@ -2368,67 +2366,235 @@ function extrairTabelaDLHEscala(linhas) {
     .map(item => ({ ...item, valor: parseBR(item.text) }))
     .filter(item => Number.isFinite(item.valor));
 
-  const tentarPonto = (numeros, padroes, indice, tipo) => {
-    const padraoEsperado = padroes[indice];
-    if (!Number.isFinite(padraoEsperado) || numeros.length < 4) return null;
+  const linhasEscala = (linhas || [])
+    .map((linha, indice) => ({
+      indice,
+      pagina: Number(linha?.pagina || 0),
+      numeros: numerosDaLinhaEscala(linha)
+    }))
+    .filter(linha => linha.numeros.length >= 3);
 
-    // Procura a sequência indicado | padrão | erro | incerteza.
-    // O primeiro número pode ser a profundidade ou o índice do ponto.
+  function montarPonto(indicado, padrao, erro, incerteza, ponto) {
+    return {
+      ponto,
+      indicado: fmt2(indicado),
+      padrao: fmt2(padrao),
+      erro: fmt2(erro),
+      incerteza: fmt2(Math.abs(incerteza)),
+      soma: fmt2(Math.abs(erro) + Math.abs(incerteza))
+    };
+  }
+
+  function candidatoValido(indicado, padrao, erro, incerteza, tipo, padraoEsperado) {
+    if (![indicado, padrao, erro, incerteza].every(Number.isFinite)) return false;
+
+    if (Number.isFinite(padraoEsperado) && Math.abs(padrao - padraoEsperado) > 1.5) {
+      return false;
+    }
+
+    const faixaIndicada = tipo === "UMIDADE"
+      ? indicado >= 0 && indicado <= 100
+      : indicado >= -40 && indicado <= 80;
+    const faixaPadrao = tipo === "UMIDADE"
+      ? padrao >= 0 && padrao <= 100
+      : padrao >= -40 && padrao <= 80;
+    const faixaErro = tipo === "UMIDADE" ? 20 : 5;
+    const faixaIncerteza = tipo === "UMIDADE" ? 10 : 5;
+
+    return (
+      faixaIndicada &&
+      faixaPadrao &&
+      Math.abs(erro) <= faixaErro &&
+      Math.abs(incerteza) <= faixaIncerteza &&
+      Math.abs((indicado - padrao) - erro) <= 1.5
+    );
+  }
+
+  function candidatosDaSequencia(numeros, tipo, padraoEsperado = null) {
+    const candidatos = [];
+
+    // Layout completo: indicado | padrão | erro | incerteza.
+    // Algumas versões exportam padrão | indicado; as duas ordens são testadas.
     for (let inicio = 0; inicio <= numeros.length - 4; inicio++) {
-      const indicado = numeros[inicio]?.valor;
-      const padrao = numeros[inicio + 1]?.valor;
-      const erro = numeros[inicio + 2]?.valor;
-      const incerteza = numeros[inicio + 3]?.valor;
+      const ordens = [
+        {
+          indicado: numeros[inicio]?.valor,
+          padrao: numeros[inicio + 1]?.valor,
+          erro: numeros[inicio + 2]?.valor,
+          incerteza: numeros[inicio + 3]?.valor
+        },
+        {
+          indicado: numeros[inicio + 1]?.valor,
+          padrao: numeros[inicio]?.valor,
+          erro: numeros[inicio + 2]?.valor,
+          incerteza: numeros[inicio + 3]?.valor
+        }
+      ];
 
-      if (Math.abs(padrao - padraoEsperado) > 1.5) continue;
+      for (const ordem of ordens) {
+        if (!candidatoValido(
+          ordem.indicado,
+          ordem.padrao,
+          ordem.erro,
+          ordem.incerteza,
+          tipo,
+          padraoEsperado
+        )) continue;
 
-      const faixaIndicada = tipo === "UMIDADE"
-        ? indicado >= 0 && indicado <= 100
-        : indicado >= -40 && indicado <= 80;
-      const faixaErro = tipo === "UMIDADE" ? 20 : 5;
+        candidatos.push({
+          ...ordem,
+          inicio,
+          x: numeros[inicio]?.x || 0,
+          residuo: Math.abs((ordem.indicado - ordem.padrao) - ordem.erro),
+          formato: "colunas_completas"
+        });
+      }
+    }
 
-      if (
-        !faixaIndicada ||
-        Math.abs(erro) > faixaErro ||
-        Math.abs(incerteza) > 10 ||
-        Math.abs((indicado - padrao) - erro) > 1.5
-      ) {
+    // Layout curto: indicado | erro | incerteza | k.
+    // Sem a coluna padrão, só é seguro usar referências conhecidas.
+    if (Number.isFinite(padraoEsperado)) {
+      for (let inicio = 0; inicio <= numeros.length - 3; inicio++) {
+        const indicado = numeros[inicio]?.valor;
+        const erro = numeros[inicio + 1]?.valor;
+        const incerteza = numeros[inicio + 2]?.valor;
+        if (!candidatoValido(
+          indicado,
+          padraoEsperado,
+          erro,
+          incerteza,
+          tipo,
+          padraoEsperado
+        )) continue;
+
+        candidatos.push({
+          indicado,
+          padrao: padraoEsperado,
+          erro,
+          incerteza,
+          inicio,
+          x: numeros[inicio]?.x || 0,
+          residuo: Math.abs((indicado - padraoEsperado) - erro),
+          formato: "colunas_resumidas"
+        });
+      }
+    }
+
+    return candidatos;
+  }
+
+  function procurarPonto(padroes, indice, tipo, linhasDisponiveis) {
+    const padraoEsperado = padroes[indice];
+    for (const linha of linhasDisponiveis) {
+      const candidato = candidatosDaSequencia(
+        linha.numeros,
+        tipo,
+        padraoEsperado
+      )[0];
+      if (candidato) {
+        return { ...candidato, linhaIndice: linha.indice, pagina: linha.pagina };
+      }
+    }
+    return null;
+  }
+
+  // A temperatura é identificada primeiro e suas linhas ficam reservadas.
+  // Isso evita que uma linha de temperatura seja confundida com umidade
+  // quando o certificado usa referências diferentes de 10/50/90 %UR.
+  const linhasUsadasTemperatura = new Set();
+  const pontosTemperatura = [];
+  for (let indice = 0; indice < padroesTemperatura.length; indice++) {
+    const linhasDisponiveis = linhasEscala.filter(
+      linha => !linhasUsadasTemperatura.has(linha.indice)
+    );
+    const candidato = procurarPonto(
+      padroesTemperatura,
+      indice,
+      "TEMPERATURA",
+      linhasDisponiveis
+    );
+    if (!candidato) continue;
+
+    linhasUsadasTemperatura.add(candidato.linhaIndice);
+    pontosTemperatura.push(montarPonto(
+      candidato.indicado,
+      candidato.padrao,
+      candidato.erro,
+      candidato.incerteza,
+      pontosTemperatura.length + 1
+    ));
+  }
+
+  const linhasDisponiveisUmidade = linhasEscala.filter(
+    linha => !linhasUsadasTemperatura.has(linha.indice)
+  );
+  const linhasUsadasUmidade = new Set();
+  const pontosUmidade = [];
+
+  // Primeiro tenta os pontos tradicionais, sem alterar a regra atual.
+  for (let indice = 0; indice < padroesUmidade.length; indice++) {
+    const linhasDisponiveis = linhasDisponiveisUmidade.filter(
+      linha => !linhasUsadasUmidade.has(linha.indice)
+    );
+    const candidato = procurarPonto(
+      padroesUmidade,
+      indice,
+      "UMIDADE",
+      linhasDisponiveis
+    );
+    if (!candidato) continue;
+
+    linhasUsadasUmidade.add(candidato.linhaIndice);
+    pontosUmidade.push(montarPonto(
+      candidato.indicado,
+      candidato.padrao,
+      candidato.erro,
+      candidato.incerteza,
+      pontosUmidade.length + 1
+    ));
+  }
+
+  let formaUmidade = "padroes_fixos";
+
+  // Layouts novos podem usar, por exemplo, 30/50/70 ou 35/50/75 %UR.
+  // Nesse caso os próprios valores da coluna padrão são a referência correta.
+  if (pontosUmidade.length < padroesUmidade.length) {
+    const candidatosUmidade = linhasDisponiveisUmidade
+      .flatMap(linha => {
+        const candidatos = candidatosDaSequencia(linha.numeros, "UMIDADE")
+          .sort((a, b) => a.residuo - b.residuo);
+        const candidato = candidatos[0];
+        return candidato
+          ? [{ ...candidato, linhaIndice: linha.indice, pagina: linha.pagina }]
+          : [];
+      })
+      .filter(candidato => candidato.padrao >= 5 && candidato.padrao <= 100)
+      .sort((a, b) => a.linhaIndice - b.linhaIndice || a.inicio - b.inicio);
+
+    for (let inicio = 0; inicio <= candidatosUmidade.length - 3; inicio++) {
+      const grupo = candidatosUmidade.slice(inicio, inicio + 3);
+      const mesmaPagina = grupo.every(ponto => ponto.pagina === grupo[0].pagina);
+      const linhasDistintas = new Set(grupo.map(ponto => ponto.linhaIndice)).size === 3;
+      const padroesCrescentes = grupo[0].padrao < grupo[1].padrao &&
+        grupo[1].padrao < grupo[2].padrao;
+      const faixaSuficiente = grupo[2].padrao - grupo[0].padrao >= 10;
+
+      if (!mesmaPagina || !linhasDistintas || !padroesCrescentes || !faixaSuficiente) {
         continue;
       }
 
-      return {
-        ponto: indice + 1,
-        indicado: fmt2(indicado),
-        padrao: fmt2(padrao),
-        erro: fmt2(erro),
-        incerteza: fmt2(Math.abs(incerteza)),
-        soma: fmt2(Math.abs(erro) + Math.abs(incerteza))
-      };
-    }
-
-    return null;
-  };
-
-  for (const linha of linhas || []) {
-    const numeros = numerosDaLinhaEscala(linha);
-    if (pontosUmidade.length < padroesUmidade.length) {
-      const pontoUmidade = tentarPonto(
-        numeros,
-        padroesUmidade,
-        pontosUmidade.length,
-        "UMIDADE"
-      );
-      if (pontoUmidade) pontosUmidade.push(pontoUmidade);
-    }
-
-    if (pontosTemperatura.length < padroesTemperatura.length) {
-      const pontoTemperatura = tentarPonto(
-        numeros,
-        padroesTemperatura,
-        pontosTemperatura.length,
-        "TEMPERATURA"
-      );
-      if (pontoTemperatura) pontosTemperatura.push(pontoTemperatura);
+      pontosUmidade.length = 0;
+      for (const candidato of grupo) {
+        pontosUmidade.push(montarPonto(
+          candidato.indicado,
+          candidato.padrao,
+          candidato.erro,
+          candidato.incerteza,
+          pontosUmidade.length + 1
+        ));
+      }
+      formaUmidade = "padroes_extraidos_da_tabela";
+      break;
     }
   }
 
@@ -2443,7 +2609,10 @@ function extrairTabelaDLHEscala(linhas) {
       parser: "escala_layout",
       motivo: "Formato alternativo por colunas posicionadas",
       umidade_encontrada: pontosUmidade.length,
-      temperatura_encontrada: pontosTemperatura.length
+      temperatura_encontrada: pontosTemperatura.length,
+      forma_umidade: formaUmidade,
+      padroes_umidade: pontosUmidade.map(ponto => ponto.padrao),
+      linhas_temperatura: [...linhasUsadasTemperatura]
     }
   };
 }
