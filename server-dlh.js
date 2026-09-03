@@ -92,7 +92,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03";
+const BACKEND_VERSION = "assistente-backend-2026-09-03-pdf-layout";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -2237,18 +2237,30 @@ async function baixarArquivoDrive(fileId) {
 // =========================
 async function extrairTextoELinhasDoPDF(buffer) {
   const pdf = await getDocument({ data: new Uint8Array(buffer) }).promise;
-  const page = await pdf.getPage(1);
-  const textContent = await page.getTextContent();
+  const items = [];
+  const linhas = [];
 
-  const items = textContent.items
-    .map(i => ({
-      text: String(i.str || "").trim(),
-      x: i.transform[4],
-      y: i.transform[5]
-    }))
-    .filter(i => i.text);
+  for (let numeroPagina = 1; numeroPagina <= pdf.numPages; numeroPagina++) {
+    const page = await pdf.getPage(numeroPagina);
+    const textContent = await page.getTextContent();
+    const itensPagina = textContent.items
+      .map(i => ({
+        text: String(i.str || "").trim(),
+        x: i.transform[4],
+        y: i.transform[5],
+        pagina: numeroPagina
+      }))
+      .filter(i => i.text);
 
-  const linhas = agruparLinhasPorY(items);
+    const linhasPagina = agruparLinhasPorY(itensPagina).map(linha => ({
+      ...linha,
+      pagina: numeroPagina
+    }));
+
+    items.push(...itensPagina);
+    linhas.push(...linhasPagina);
+  }
+
   const texto = linhas.map(l => l.texto).join("\n");
 
   return { texto, items, linhas };
@@ -2332,6 +2344,35 @@ async function extrairTabelaDLH(buffer) {
     return (String(textoLinha || "").match(/-?\d+(?:[,.]\d+)?/g) || [])
       .map(v => parseBR(v))
       .filter(v => !Number.isNaN(v));
+  }
+
+  function normalizarTituloTabela(textoLinha) {
+    return String(textoLinha || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function identificarModoTabela(textoLinha) {
+    const titulo = normalizarTituloTabela(textoLinha);
+    if (
+      titulo.includes("UMIDADE") ||
+      titulo.includes("HUMIDADE") ||
+      (titulo.includes("TESTE") && /U\s*\.?\s*R/.test(titulo))
+    ) {
+      return "UMIDADE";
+    }
+
+    if (
+      titulo.includes("TEMPERATURA") ||
+      (titulo.includes("TESTE") && (/[º°]?\s*C\b/.test(titulo) || /\bOC\b/.test(titulo)))
+    ) {
+      return "TEMPERATURA";
+    }
+
+    return "";
   }
 
   function adicionarUmidade(valores) {
@@ -2444,27 +2485,13 @@ async function extrairTabelaDLH(buffer) {
   let modo = "";
 
   for (const linha of textoLinhas) {
-    const upper = linha.toUpperCase();
-
-    if (
-      upper.includes("TESTE (%U.R.)") ||
-      upper.includes("TESTE (% U.R.)") ||
-      upper.includes("TESTE (%UR)") ||
-      (upper.includes("TESTE") && upper.includes("U.R"))
-    ) {
-      modo = "UMIDADE";
+    const novoModo = identificarModoTabela(linha);
+    if (novoModo) {
+      modo = novoModo;
       continue;
     }
 
-    if (
-      upper.includes("TESTE (ºC)") ||
-      upper.includes("TESTE (°C)") ||
-      upper.includes("TESTE (OC)") ||
-      (upper.includes("TESTE") && (upper.includes("ºC") || upper.includes("°C")))
-    ) {
-      modo = "TEMPERATURA";
-      continue;
-    }
+    const upper = normalizarTituloTabela(linha);
 
     if (
       upper.includes("A INCERTEZA") ||
@@ -2570,25 +2597,13 @@ async function extrairTabelaDLH(buffer) {
 
     for (const linha of linhas) {
       const linhaTexto = String(linha.texto || "");
-      const upper = linhaTexto.toUpperCase();
-
-      if (
-        upper.includes("TESTE (%U.R.)") ||
-        upper.includes("TESTE (% U.R.)") ||
-        (upper.includes("TESTE") && upper.includes("U.R"))
-      ) {
-        modoLinha = "UMIDADE";
+      const novoModo = identificarModoTabela(linhaTexto);
+      if (novoModo) {
+        modoLinha = novoModo;
         continue;
       }
 
-      if (
-        upper.includes("TESTE (ºC)") ||
-        upper.includes("TESTE (°C)") ||
-        (upper.includes("TESTE") && (upper.includes("ºC") || upper.includes("°C")))
-      ) {
-        modoLinha = "TEMPERATURA";
-        continue;
-      }
+      const upper = normalizarTituloTabela(linhaTexto);
 
       if (
         upper.includes("A INCERTEZA") ||
