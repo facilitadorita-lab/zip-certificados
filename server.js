@@ -305,13 +305,24 @@ async function buscarUsuarioAuthPorEmail(email) {
 
 function usuarioJaDefiniuSenha(usuario) {
   const metadata = usuario?.user_metadata || {};
-  return Boolean(
+  const senhaDefinida = Boolean(
     metadata.senha_definida === true ||
     metadata.senha_definida === "true" ||
     metadata.cadastro_concluido === true ||
-    metadata.cadastro_concluido === "true" ||
-    usuario?.last_sign_in_at
+    metadata.cadastro_concluido === "true"
   );
+  if (senhaDefinida) return true;
+
+  // Aceitar um convite pode registrar last_sign_in_at antes da criação da senha.
+  // Enquanto o convite estiver pendente, o usuário ainda pode receber outro link.
+  const convitePendente = Boolean(
+    metadata.convite_pendente === true ||
+    metadata.convite_pendente === "true" ||
+    usuario?.invited_at
+  );
+  if (convitePendente) return false;
+
+  return Boolean(usuario?.last_sign_in_at && usuario?.email_confirmed_at);
 }
 
 async function buscarPerfilUsuario(user) {
@@ -3862,7 +3873,14 @@ app.post("/usuarios/convidar", async (req, res) => {
     }
 
     const options = {
-      data: { nome: nome || email.split("@")[0], role }
+      data: {
+        nome: nome || email.split("@")[0],
+        role,
+        convite_pendente: true,
+        senha_definida: false,
+        cadastro_concluido: false,
+        convite_enviado_em: new Date().toISOString()
+      }
     };
     if (INVITE_REDIRECT_URL) options.redirectTo = INVITE_REDIRECT_URL;
 
