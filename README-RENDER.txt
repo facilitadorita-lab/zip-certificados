@@ -25,6 +25,15 @@ IMPORTANTE PARA OS RELATORIOS PDF
 Nunca coloque valores secretos nos arquivos.
 Cadastre os valores indicados em .env.example na tela Environment do Render.
 
+FALLBACK DE LEITURA DLH COM IA
+- O parser original continua sendo sempre a primeira tentativa.
+- O leitor de layout alternativo e tentado somente quando o original nao retorna 3 pontos de umidade e 4 de temperatura.
+- A IA so e chamada quando OPENAI_API_KEY estiver configurada; sem essa chave o backend segue funcionando apenas com os parsers locais.
+- OPENAI_DLH_MODEL: modelo usado no fallback, padrao gpt-4.1-mini.
+- DLH_AI_FALLBACK_ENABLED: true ou false, padrao true.
+- DLH_AI_TIMEOUT_MS: tempo maximo da leitura da IA em milissegundos, padrao 60000.
+- A IA precisa retornar o conjunto completo; pontos parciais sao descartados e nao alteram o resultado do parser original.
+
 SUPORTE POR E-MAIL E TELEGRAM
 - SUPPORT_TO_EMAIL: e-mail que recebe os novos tickets.
 - SUPPORT_FROM_EMAIL: remetente verificado no Resend.

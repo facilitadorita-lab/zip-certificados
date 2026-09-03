@@ -72,6 +72,10 @@ const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "";
 const FOLDER_ID_DLH = process.env.FOLDER_ID_DLH || "";
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_DLH_MODEL = process.env.OPENAI_DLH_MODEL || "gpt-4.1-mini";
+const DLH_AI_FALLBACK_ENABLED = String(process.env.DLH_AI_FALLBACK_ENABLED || "true") === "true";
+const DLH_AI_TIMEOUT_MS = Number(process.env.DLH_AI_TIMEOUT_MS || 60000);
 const DOWNLOADS_FOLDER_ID_DLH =
   process.env.DOWNLOADS_FOLDER_ID_DLH || FOLDER_ID_DLH || "";
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
@@ -2335,18 +2339,21 @@ function normalizarTituloTabelaDLH(textoLinha) {
 }
 
 function identificarModoTabelaDLH(textoLinha) {
-  const titulo = normalizarTituloTabelaDLH(textoLinha);
+  const titulo = String(textoLinha || "").toUpperCase();
   if (
-    titulo.includes("UMIDADE") ||
-    titulo.includes("HUMIDADE") ||
-    (titulo.includes("TESTE") && /U\s*\.?\s*R/.test(titulo))
+    titulo.includes("TESTE (%U.R.)") ||
+    titulo.includes("TESTE (% U.R.)") ||
+    titulo.includes("TESTE (%UR)") ||
+    (titulo.includes("TESTE") && titulo.includes("U.R"))
   ) {
     return "UMIDADE";
   }
 
   if (
-    titulo.includes("TEMPERATURA") ||
-    (titulo.includes("TESTE") && (/[º°]?\s*C\b/.test(titulo) || /\bOC\b/.test(titulo)))
+    titulo.includes("TESTE (ºC)") ||
+    titulo.includes("TESTE (°C)") ||
+    titulo.includes("TESTE (OC)") ||
+    (titulo.includes("TESTE") && (titulo.includes("ºC") || titulo.includes("°C")))
   ) {
     return "TEMPERATURA";
   }
@@ -2930,6 +2937,200 @@ async function extrairTabelaDLH(buffer) {
   };
 }
 
+function numeroRespostaDLHIA(valor) {
+  if (typeof valor === "number") return Number.isFinite(valor) ? valor : NaN;
+  return parseBR(String(valor || "").replace(/[^0-9,.-]/g, ""));
+}
+
+function extrairJSONRespostaDLHIA(texto) {
+  const bruto = String(texto || "").trim();
+  const semBloco = bruto
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  const inicio = semBloco.indexOf("{");
+  const fim = semBloco.lastIndexOf("}");
+  if (inicio < 0 || fim <= inicio) throw new Error("A IA nao retornou JSON");
+  return JSON.parse(semBloco.slice(inicio, fim + 1));
+}
+
+function validarPontosDLHIA(lista, quantidade, tipo) {
+  if (!Array.isArray(lista) || lista.length < quantidade) return null;
+
+  const pontos = lista.slice(0, quantidade).map((item, indice) => {
+    const indicado = numeroRespostaDLHIA(item?.indicado ?? item?.valor_indicado);
+    const padrao = numeroRespostaDLHIA(item?.padrao ?? item?.referencia ?? item?.valor_padrao);
+    const erro = numeroRespostaDLHIA(item?.erro);
+    const incerteza = Math.abs(numeroRespostaDLHIA(item?.incerteza ?? item?.incerteza_expandida));
+
+    return { indice, indicado, padrao, erro, incerteza };
+  });
+
+  if (pontos.some(ponto => ![
+    ponto.indicado,
+    ponto.padrao,
+    ponto.erro,
+    ponto.incerteza
+  ].every(Number.isFinite))) return null;
+
+  const limites = tipo === "UMIDADE"
+    ? { indicadoMin: 0, indicadoMax: 100, padraoMin: 0, padraoMax: 100, erroMax: 20 }
+    : { indicadoMin: -40, indicadoMax: 80, padraoMin: -40, padraoMax: 80, erroMax: 5 };
+
+  for (const ponto of pontos) {
+    if (
+      ponto.indicado < limites.indicadoMin ||
+      ponto.indicado > limites.indicadoMax ||
+      ponto.padrao < limites.padraoMin ||
+      ponto.padrao > limites.padraoMax ||
+      Math.abs(ponto.erro) > limites.erroMax ||
+      ponto.incerteza < 0 ||
+      ponto.incerteza > 10 ||
+      Math.abs((ponto.indicado - ponto.padrao) - ponto.erro) > 3
+    ) return null;
+  }
+
+  if (tipo === "TEMPERATURA") {
+    for (const [indice, padraoEsperado] of [-20, 0, 15, 60].entries()) {
+      if (Math.abs(pontos[indice].padrao - padraoEsperado) > 3) return null;
+    }
+  }
+
+  if (tipo === "UMIDADE" && pontos.some((ponto, indice) => (
+    indice > 0 && ponto.padrao <= pontos[indice - 1].padrao
+  ))) return null;
+
+  return pontos.map((ponto, indice) => ({
+    ponto: indice + 1,
+    indicado: fmt2(ponto.indicado),
+    padrao: fmt2(ponto.padrao),
+    erro: fmt2(ponto.erro),
+    incerteza: fmt2(ponto.incerteza),
+    soma: fmt2(Math.abs(ponto.erro) + ponto.incerteza)
+  }));
+}
+
+async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
+  if (!DLH_AI_FALLBACK_ENABLED || !OPENAI_API_KEY) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DLH_AI_TIMEOUT_MS);
+
+  const schemaPonto = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ponto: { type: "integer" },
+      indicado: { type: "number" },
+      padrao: { type: "number" },
+      erro: { type: "number" },
+      incerteza: { type: "number" }
+    },
+    required: ["ponto", "indicado", "padrao", "erro", "incerteza"]
+  };
+
+  const instrucoes = [
+    "Voce e um leitor tecnico de certificados de calibracao DLH.",
+    "Leia o PDF anexado, inclusive tabelas desenhadas por posicionamento de colunas.",
+    "Extraia somente os pontos da tabela de calibracao, nunca valores do cabecalho, ambiente ou texto de observacao.",
+    "Umidade deve ter exatamente 3 pontos e temperatura exatamente 4 pontos.",
+    "Use indicado, padrao, erro e incerteza expandida. Se o PDF nao mostrar a coluna padrao, use os padroes tecnicos da tabela.",
+    "Normalize o erro como indicado menos padrao e retorne numeros, sem unidades ou texto.",
+    "Nao invente pontos. Se uma tabela estiver ilegivel, retorne uma lista vazia para ela.",
+    "Retorne exclusivamente o JSON solicitado."
+  ].join(" ");
+
+  const textoExtraido = String(texto || "").slice(0, 24000);
+  const body = {
+    model: OPENAI_DLH_MODEL,
+    input: [
+      {
+        role: "system",
+        content: [{ type: "input_text", text: instrucoes }]
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `Texto extraido para apoio:\n${textoExtraido}\n\nDiagnostico do leitor deterministico:\n${JSON.stringify(diagnosticoParser || {})}`
+          },
+          {
+            type: "input_file",
+            filename: "certificado-dlh.pdf",
+            file_data: `data:application/pdf;base64,${Buffer.from(buffer).toString("base64")}`
+          }
+        ]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "pontos_certificado_dlh",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pontos_umidade: {
+              type: "array",
+              items: schemaPonto
+            },
+            pontos_temperatura: {
+              type: "array",
+              items: schemaPonto
+            }
+          },
+          required: ["pontos_umidade", "pontos_temperatura"]
+        }
+      }
+    }
+  };
+
+  try {
+    const resposta = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const dados = await resposta.json();
+    if (!resposta.ok) {
+      throw new Error(`OpenAI HTTP ${resposta.status}: ${String(dados?.error?.message || "falha na API")}`);
+    }
+
+    const textoResposta = dados.output_text || (dados.output || [])
+      .flatMap(item => item.content || [])
+      .map(item => item.text || "")
+      .join("\n");
+    const json = extrairJSONRespostaDLHIA(textoResposta);
+    const pontosUmidade = validarPontosDLHIA(json.pontos_umidade, 3, "UMIDADE");
+    const pontosTemperatura = validarPontosDLHIA(json.pontos_temperatura, 4, "TEMPERATURA");
+
+    if (!pontosUmidade || !pontosTemperatura) {
+      throw new Error("A IA retornou pontos incompletos ou incoerentes");
+    }
+
+    return {
+      ok: true,
+      pontos_umidade: pontosUmidade,
+      pontos_temperatura: pontosTemperatura,
+      debug: {
+        parser: "ia_fallback",
+        modelo: OPENAI_DLH_MODEL,
+        motivo: "Leitor deterministico nao reconheceu o layout"
+      }
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 
 // =========================
 // CRITÉRIOS DE ACEITAÇÃO
@@ -3226,13 +3427,31 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
     if (!meta.serie && fallbackNome.serie) meta.serie = fallbackNome.serie;
     if (!meta.data && fallbackNome.data) meta.data = fallbackNome.data;
 
-    const tabela = await extrairTabelaDLH(buffer);
+    let tabela = await extrairTabelaDLH(buffer);
+
+    // A IA so e consultada quando os leitores deterministico e alternativo
+    // nao entregam o conjunto completo. Um resultado parcial nunca e aceito.
+    if (!tabela.ok && DLH_AI_FALLBACK_ENABLED && OPENAI_API_KEY) {
+      try {
+        const tabelaIA = await extrairTabelaDLHComIA(buffer, texto, tabela.debug);
+        if (tabelaIA?.ok) tabela = tabelaIA;
+      } catch (erroIA) {
+        tabela = {
+          ...tabela,
+          debug: {
+            ...(tabela.debug || {}),
+            ia_fallback: "falhou",
+            ia_motivo: textoCurtoErroDLH(erroIA.message)
+          }
+        };
+      }
+    }
 
     if (!tabela.ok) {
       return {
         status: "ERRO",
-        pontos_umidade: tabela.pontos_umidade || [],
-        pontos_temperatura: tabela.pontos_temperatura || [],
+        pontos_umidade: [],
+        pontos_temperatura: [],
         certificado: meta.certificado || "",
         meta,
         debug: tabela.debug
@@ -3880,6 +4099,7 @@ app.get("/dlh/versao", (_req, res) => {
     versao: BACKEND_VERSION,
     commit_render: process.env.RENDER_GIT_COMMIT || null,
     servico_render: process.env.RENDER_SERVICE_NAME || null,
+    ia_fallback_configurado: Boolean(DLH_AI_FALLBACK_ENABLED && OPENAI_API_KEY),
     verificado_em: new Date().toISOString(),
     rotas_assistente: [
       "/dlh/assistente/resumo",
