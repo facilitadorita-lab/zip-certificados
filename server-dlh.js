@@ -2999,6 +2999,106 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
   }
 }
 
+function textoCurtoErroDLH(valor) {
+  return String(valor || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+}
+
+function motivoErroProcessamentoDLH(proc, motivoFallback = "") {
+  const debug = proc?.debug || {};
+  const umidade = Number(debug.umidade_encontrada);
+  const temperatura = Number(debug.temperatura_encontrada);
+
+  if (Number.isFinite(umidade) && Number.isFinite(temperatura)) {
+    return `Erro de processamento: tabela de calibração incompleta (umidade ${umidade}/3; temperatura ${temperatura}/4).`;
+  }
+
+  const fallback = textoCurtoErroDLH(motivoFallback);
+  const original = textoCurtoErroDLH(debug.erro || debug.motivo || fallback);
+
+  if (/metadados insuficientes/i.test(original)) {
+    return "Erro de processamento: não foi possível identificar o DLH, a série ou a data da calibração no PDF ou no nome do arquivo.";
+  }
+
+  if (/drive|download|baixar|http\s*[45]\d\d|fetch/i.test(original)) {
+    return "Erro de processamento: não foi possível acessar ou baixar o PDF no Google Drive.";
+  }
+
+  if (/pdf|leitura|texto|parse|document/i.test(original)) {
+    return "Erro de processamento: não foi possível ler o conteúdo do PDF.";
+  }
+
+  if (/quantidade insuficiente|pontos dlh/i.test(original)) {
+    return "Erro de processamento: a tabela de calibração não contém todos os pontos esperados.";
+  }
+
+  return original
+    ? `Erro de processamento: ${original.replace(/^erro de processamento:\s*/i, "")}`
+    : "Erro de processamento: não foi possível interpretar a tabela de calibração do PDF.";
+}
+
+function motivoRegistroDLH(proc, divergencia, duplicado, motivoFallback = "") {
+  if (proc?.status === "ERRO") return motivoErroProcessamentoDLH(proc, motivoFallback);
+  if (duplicado) return "Certificado duplicado";
+  return divergencia.motivo_divergencia;
+}
+
+function diagnosticoRegistroDLH(registro) {
+  const status = String(registro?.status || "").toUpperCase();
+  const motivo = textoCurtoErroDLH(registro?.motivo_divergencia);
+  const motivoGenerico = /^(divergente|s[eé]rie divergente)$/i.test(motivo);
+
+  if (status === "ERRO") {
+    if (motivo && !motivoGenerico) return motivo;
+    return "Falha na leitura da tabela de calibração do PDF. O arquivo foi localizado, mas os pontos esperados não foram reconhecidos.";
+  }
+
+  if (registro?.duplicado) return motivo || "Certificado duplicado";
+
+  const serie = String(registro?.serie || "").trim();
+  const serieEsperada = String(registro?.serie_esperada || "").trim();
+  if (registro?.divergente && serie && serieEsperada && serie !== serieEsperada) {
+    return `Série divergente: no certificado ${serie}; esperada ${serieEsperada}.`;
+  }
+
+  return motivo || "Divergência cadastrada para este certificado.";
+}
+
+async function inserirErroProcessamentoDLH(arquivo, proc, motivo, metaOverride = null) {
+  const meta = metaOverride || proc?.meta || {};
+  const val = verificarValidade(meta.data);
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/certificados_dlh`, {
+    method: "POST",
+    headers: supabaseHeaders(),
+    body: JSON.stringify({
+      id: arquivo.id,
+      nome_original: arquivo.name,
+      nome_download: arquivo.name,
+      dlh: meta.dlh || null,
+      serie: meta.serie || null,
+      data: meta.data || null,
+      certificado: proc?.certificado || meta.certificado || "",
+      status: "ERRO",
+      validade: val.valido,
+      vencimento: val.vencimento,
+      mes_ano_validade: val.mes_ano,
+      pontos_umidade: proc?.pontos_umidade || [],
+      pontos_temperatura: proc?.pontos_temperatura || [],
+      divergente: false,
+      duplicado: false,
+      serie_esperada: null,
+      motivo_divergencia: motivo,
+      criado_em: new Date().toISOString()
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+}
+
 // =========================
 // BANCO
 // =========================
@@ -3120,14 +3220,24 @@ async function executarSyncDLH() {
 
     try {
       const proc = await processarPDFDLH(f.id, f.name);
-      const meta = proc.meta || {};
+      const metaExtraida = proc.meta || {};
+      const metaNome = extrairDadosNomeArquivo(f.name);
+      const meta = {
+        dlh: metaExtraida.dlh || metaNome.dlh || "",
+        serie: metaExtraida.serie || metaNome.serie || "",
+        data: metaExtraida.data || metaNome.data || "",
+        certificado: metaExtraida.certificado || ""
+      };
 
       if (!meta.dlh || !meta.serie || !meta.data) {
-        erros.push({
-          arquivo: f.name,
-          motivo: "Metadados insuficientes",
-          meta
-        });
+        const camposAusentes = ["DLH", "série", "data da calibração"]
+          .filter((_, index) => ![meta.dlh, meta.serie, meta.data][index]);
+        const motivo = `Erro de processamento: não foi possível identificar ${camposAusentes.join(", ")} no PDF ou no nome do arquivo.`;
+
+        await inserirErroProcessamentoDLH(f, proc, motivo, meta);
+        idsBanco.add(f.id);
+        processados++;
+        erros.push({ arquivo: f.name, motivo });
         continue;
       }
 
@@ -3165,9 +3275,7 @@ async function executarSyncDLH() {
           divergente: divergencia.divergente || duplicado,
           duplicado: duplicado,
           serie_esperada: divergencia.serie_esperada,
-          motivo_divergencia: duplicado
-            ? "Certificado duplicado"
-            : divergencia.motivo_divergencia,
+          motivo_divergencia: motivoRegistroDLH(proc, divergencia, duplicado),
           criado_em: new Date().toISOString()
         })
       });
@@ -3307,9 +3415,7 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
             duplicado: duplicado,
             divergente: divergencia.divergente || duplicado,
             serie_esperada: divergencia.serie_esperada,
-            motivo_divergencia: duplicado
-              ? "Certificado duplicado"
-              : divergencia.motivo_divergencia
+            motivo_divergencia: motivoRegistroDLH(proc, divergencia, duplicado)
           })
         }
       );
@@ -3863,18 +3969,22 @@ app.get("/dlh/divergentes", async (req, res) => {
     );
 
     const data = aplicarValidadeAtual(await r.json());
+    const registros = Array.isArray(data)
+      ? data.map((registro) => ({
+          ...registro,
+          diagnostico: diagnosticoRegistroDLH(registro)
+        }))
+      : [];
     const contentRange = r.headers.get("content-range");
     const total = contentRange
       ? Number(contentRange.split("/")[1])
-      : Array.isArray(data)
-        ? data.length
-        : 0;
+      : registros.length;
 
     res.json({
       total,
       limit,
       offset,
-      registros: Array.isArray(data) ? data : []
+      registros
     });
   } catch (e) {
     res.status(500).json({ erro: e.message });
