@@ -92,7 +92,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-07-23";
+const BACKEND_VERSION = "assistente-backend-2026-09-03";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -112,6 +112,7 @@ let statusCacheDLH = { expiraEm: 0, valor: null };
 let idsBancoCacheDLH = { expiraEm: 0, valor: null };
 let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
 let syncLocalDLHEmExecucao = false;
+let reprocessJobDLH = null;
 let criteriosCacheDLH = { expiraEm: 0, valor: null };
 let metricasFlushEmExecucao = false;
 let ultimoSlotMetricas = "";
@@ -3441,9 +3442,96 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
     mensagem: "Reprocessamento DLH concluído",
     processados,
     offset,
-    proximo_offset: offset + processados,
+    // Avança pelos itens tentados, inclusive os que falharam individualmente.
+    // Assim um arquivo com erro não trava o lote no mesmo offset.
+    proximo_offset: offset + lista.length,
     erros
   };
+}
+
+function criarJobReprocessamentoDLH() {
+  return {
+    id: crypto.randomUUID(),
+    status: "queued",
+    total: 0,
+    concluidos: 0,
+    processados: 0,
+    falhas: 0,
+    ultimo_offset: 0,
+    ultimo_erro: null,
+    iniciado_em: new Date().toISOString(),
+    atualizado_em: new Date().toISOString(),
+    concluido_em: null
+  };
+}
+
+function atualizarJobReprocessamentoDLH(patch = {}) {
+  if (!reprocessJobDLH) return;
+  reprocessJobDLH = {
+    ...reprocessJobDLH,
+    ...patch,
+    atualizado_em: new Date().toISOString()
+  };
+}
+
+async function executarJobReprocessamentoDLH() {
+  const tamanhoLote = 8;
+  let offset = 0;
+  let tentativasLote = 0;
+
+  try {
+    const total = await contarTabela("certificados_dlh");
+    atualizarJobReprocessamentoDLH({ status: "running", total });
+
+    while (offset < total) {
+      let resultado;
+
+      try {
+        resultado = await executarReprocessDLH(tamanhoLote, offset);
+        tentativasLote = 0;
+      } catch (erroLote) {
+        tentativasLote++;
+        if (tentativasLote < 3) {
+          atualizarJobReprocessamentoDLH({ ultimo_erro: `Tentativa ${tentativasLote}/3: ${erroLote.message}` });
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        throw erroLote;
+      }
+
+      const tentados = Number(resultado?.proximo_offset) - offset;
+      const concluidos = Number.isFinite(tentados) && tentados > 0
+        ? tentados
+        : tamanhoLote;
+      const processados = Number(resultado?.processados || 0);
+      const erros = Array.isArray(resultado?.erros) ? resultado.erros : [];
+
+      offset += concluidos;
+      atualizarJobReprocessamentoDLH({
+        concluidos: Math.min(total, offset),
+        processados: (reprocessJobDLH?.processados || 0) + processados,
+        falhas: (reprocessJobDLH?.falhas || 0) + erros.length,
+        ultimo_offset: offset,
+        ultimo_erro: erros.length ? erros[erros.length - 1]?.erro || erros[erros.length - 1]?.motivo || "Falha em um arquivo" : null
+      });
+
+      if (concluidos <= 0) break;
+      if (concluidos < tamanhoLote) break;
+    }
+
+    atualizarJobReprocessamentoDLH({
+      status: "completed",
+      concluidos: total,
+      concluido_em: new Date().toISOString(),
+      ultimo_erro: null
+    });
+  } catch (e) {
+    atualizarJobReprocessamentoDLH({
+      status: "failed",
+      ultimo_erro: e.message || "Falha geral no reprocessamento",
+      concluido_em: new Date().toISOString()
+    });
+  }
 }
 
 // =========================
@@ -3820,6 +3908,26 @@ app.get("/dlh/sync", async (req, res) => {
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
+});
+
+app.post("/dlh/reprocess", async (req, res) => {
+  try {
+    const statusAtual = reprocessJobDLH?.status;
+    if (statusAtual === "queued" || statusAtual === "running") {
+      return res.status(202).json(reprocessJobDLH);
+    }
+
+    const job = criarJobReprocessamentoDLH();
+    reprocessJobDLH = job;
+    res.status(202).json(job);
+    setImmediate(() => executarJobReprocessamentoDLH());
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+app.get("/dlh/reprocess/status", async (_req, res) => {
+  res.json(reprocessJobDLH || { status: "idle" });
 });
 
 app.get("/dlh/reprocess", async (req, res) => {
