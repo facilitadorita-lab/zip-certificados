@@ -32,7 +32,11 @@ FALLBACK DE LEITURA DLH COM IA
 - OPENAI_DLH_MODEL: modelo usado no fallback, padrao gpt-4.1-mini.
 - DLH_AI_FALLBACK_ENABLED: true ou false, padrao true.
 - DLH_AI_TIMEOUT_MS: tempo maximo da leitura da IA em milissegundos, padrao 60000.
+- DRIVE_REQUEST_TIMEOUT_MS: limite para listar ou baixar um PDF do Drive, padrao 45000.
+- PROCESSAMENTO_ARQUIVO_TIMEOUT_MS: limite total para processar um PDF, padrao 150000.
+- EXTERNAL_REQUEST_TIMEOUT_MS: limite geral para chamadas externas, padrao 60000.
 - A IA precisa retornar o conjunto completo; pontos parciais sao descartados e nao alteram o resultado do parser original.
+- Falhas de download, leitura ou gravacao ficam registradas como ERRO para o lote finalizar e poder ser reprocessado depois.
 
 SUPORTE POR E-MAIL E TELEGRAM
 - SUPPORT_TO_EMAIL: e-mail que recebe os novos tickets.

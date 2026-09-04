@@ -76,6 +76,9 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_DLH_MODEL = process.env.OPENAI_DLH_MODEL || "gpt-4.1-mini";
 const DLH_AI_FALLBACK_ENABLED = String(process.env.DLH_AI_FALLBACK_ENABLED || "true") === "true";
 const DLH_AI_TIMEOUT_MS = Number(process.env.DLH_AI_TIMEOUT_MS || 60000);
+const DRIVE_REQUEST_TIMEOUT_MS = Number(process.env.DRIVE_REQUEST_TIMEOUT_MS || 45000);
+const PROCESSAMENTO_ARQUIVO_TIMEOUT_MS = Number(process.env.PROCESSAMENTO_ARQUIVO_TIMEOUT_MS || 150000);
+const EXTERNAL_REQUEST_TIMEOUT_MS = Number(process.env.EXTERNAL_REQUEST_TIMEOUT_MS || 60000);
 const DOWNLOADS_FOLDER_ID_DLH =
   process.env.DOWNLOADS_FOLDER_ID_DLH || FOLDER_ID_DLH || "";
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || "";
@@ -156,8 +159,13 @@ function classificarDestino(url) {
   return "outro";
 }
 
-async function fetch(url, options) {
-  const response = await fetchNative(url, options);
+async function fetch(url, options = {}) {
+  const requestOptions = { ...options };
+  if (!requestOptions.signal && typeof AbortSignal?.timeout === "function") {
+    requestOptions.signal = AbortSignal.timeout(EXTERNAL_REQUEST_TIMEOUT_MS);
+  }
+
+  const response = await fetchNative(url, requestOptions);
   if (!METRICS_ENABLED) return response;
 
   const destino = classificarDestino(typeof url === "string" ? url : url?.url);
@@ -1777,6 +1785,22 @@ async function esperar(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function executarComTimeout(operacao, tempoMs, contexto) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const erro = new Error(`Tempo esgotado ao ${contexto}`);
+      erro.codigo = "TIMEOUT_PROCESSAMENTO";
+      reject(erro);
+    }, tempoMs);
+  });
+
+  return Promise.race([
+    Promise.resolve().then(operacao),
+    timeout
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function executarGoogleComRetry(operacao, tentativas = 5) {
   let ultimoErro;
 
@@ -2171,6 +2195,8 @@ async function buscarArquivosDriveDLH() {
           pageToken: pageToken || undefined,
           supportsAllDrives: true,
           includeItemsFromAllDrives: true
+        }, {
+          timeout: DRIVE_REQUEST_TIMEOUT_MS
         })
       );
 
@@ -2195,7 +2221,9 @@ async function buscarArquivosDriveDLH() {
       `&includeItemsFromAllDrives=true` +
       `${pageToken ? `&pageToken=${pageToken}` : ""}`;
 
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(DRIVE_REQUEST_TIMEOUT_MS)
+    });
     const data = await res.json();
 
     if (data.error) {
@@ -2218,7 +2246,8 @@ async function baixarArquivoDrive(fileId) {
         supportsAllDrives: true
       },
       {
-        responseType: "arraybuffer"
+        responseType: "arraybuffer",
+        timeout: DRIVE_REQUEST_TIMEOUT_MS
       }
     );
 
@@ -2227,7 +2256,9 @@ async function baixarArquivoDrive(fileId) {
 
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${GOOGLE_API_KEY}&supportsAllDrives=true`;
 
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(DRIVE_REQUEST_TIMEOUT_MS)
+  });
 
   if (!res.ok) {
     throw new Error(`Falha ao baixar arquivo do Drive: ${res.status}`);
@@ -3689,6 +3720,38 @@ async function inserirErroProcessamentoDLH(arquivo, proc, motivo, metaOverride =
   }
 }
 
+async function registrarFalhaSincronizacaoDLH(arquivo, erro) {
+  const meta = extrairDadosNomeArquivo(arquivo?.name || "");
+  const mensagemOriginal = textoCurtoErroDLH(erro?.message);
+  const motivo = erro?.codigo === "TIMEOUT_PROCESSAMENTO"
+    ? `Erro de processamento: tempo esgotado ao ler o arquivo ${arquivo?.name || "do Drive"}.`
+    : `Erro de processamento: ${mensagemOriginal || "não foi possível processar o arquivo."}`;
+
+  try {
+    await inserirErroProcessamentoDLH(
+      arquivo,
+      {
+        status: "ERRO",
+        certificado: "",
+        pontos_umidade: [],
+        pontos_temperatura: []
+      },
+      motivo,
+      meta
+    );
+    return { registrado: true, motivo };
+  } catch (erroRegistro) {
+    const registro = textoCurtoErroDLH(erroRegistro?.message);
+    const jaRegistrado = /duplicate key|already exists|conflito|409/i.test(registro);
+    return {
+      registrado: jaRegistrado,
+      motivo: jaRegistrado
+        ? motivo
+        : `${motivo} Falha ao gravar o diagnóstico: ${registro || "erro desconhecido"}.`
+    };
+  }
+}
+
 // =========================
 // BANCO
 // =========================
@@ -3809,7 +3872,11 @@ async function executarSyncDLH() {
     if (processados >= LIMITE) break;
 
     try {
-      const proc = await processarPDFDLH(f.id, f.name);
+      const proc = await executarComTimeout(
+        () => processarPDFDLH(f.id, f.name),
+        PROCESSAMENTO_ARQUIVO_TIMEOUT_MS,
+        `processar ${f.name}`
+      );
       const metaExtraida = proc.meta || {};
       const metaNome = extrairDadosNomeArquivo(f.name);
       const meta = {
@@ -3872,10 +3939,30 @@ async function executarSyncDLH() {
 
       if (!respInsert.ok) {
         const erroInsert = await respInsert.text();
+        const falha = await registrarFalhaSincronizacaoDLH(
+          f,
+          new Error(`Falha ao gravar certificado no banco: ${textoCurtoErroDLH(erroInsert)}`)
+        );
+
+        if (falha.registrado) {
+          idsBanco.add(f.id);
+          processados++;
+          invalidarCachesDLH();
+          try {
+            await atualizarControleSyncDLH({
+              em_execucao: true,
+              ultima_execucao: new Date().toISOString(),
+              total_processados: idsBanco.size
+            });
+          } catch (controleErro) {
+            console.log("Falha ao atualizar progresso após erro de gravação DLH:", controleErro.message);
+          }
+        }
 
         erros.push({
           arquivo: f.name,
-          motivo: erroInsert
+          motivo: falha.motivo,
+          registrado: falha.registrado
         });
 
         continue;
@@ -3891,9 +3978,25 @@ async function executarSyncDLH() {
         total_processados: idsBanco.size
       });
     } catch (e) {
+      const falha = await registrarFalhaSincronizacaoDLH(f, e);
+      if (falha.registrado) {
+        idsBanco.add(f.id);
+        processados++;
+        invalidarCachesDLH();
+        try {
+          await atualizarControleSyncDLH({
+            em_execucao: true,
+            ultima_execucao: new Date().toISOString(),
+            total_processados: idsBanco.size
+          });
+        } catch (controleErro) {
+          console.log("Falha ao atualizar progresso após erro DLH:", controleErro.message);
+        }
+      }
       erros.push({
         arquivo: f.name,
-        motivo: e.message
+        motivo: falha.motivo,
+        registrado: falha.registrado
       });
     }
   }
@@ -3920,7 +4023,8 @@ async function executarSyncAutomaticoDLH() {
 
     const resultado = await executarSyncDLH();
     invalidarCachesDLH();
-    deveContinuar = resultado.processados > 0;
+    deveContinuar = resultado.processados > 0 &&
+      resultado.erros.some(erro => erro.registrado === false);
 
     const totalAtual = await contarCertificadosBancoDLH();
     await atualizarControleSyncDLH({
