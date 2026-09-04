@@ -2373,13 +2373,34 @@ function extrairTabelaDLHEscala(linhas) {
     .map(item => ({ ...item, valor: parseBR(item.text) }))
     .filter(item => Number.isFinite(item.valor));
 
-  const linhasEscala = (linhas || [])
-    .map((linha, indice) => ({
-      indice,
-      pagina: Number(linha?.pagina || 0),
-      numeros: numerosDaLinhaEscala(linha)
-    }))
-    .filter(linha => linha.numeros.length >= 3);
+  let modoEscala = "";
+  const linhasEscala = [];
+  for (const [indice, linha] of (linhas || []).entries()) {
+    const textoLinha = String(linha?.texto || "");
+    const novoModo = identificarModoTabelaDLH(textoLinha);
+    if (novoModo) modoEscala = novoModo;
+
+    const upper = normalizarTituloTabelaDLH(textoLinha);
+    if (
+      upper.includes("A INCERTEZA") ||
+      upper.includes("OBSERVAÇÕES") ||
+      upper.includes("OBSERVACOES") ||
+      upper.includes("DATA DA CALIBRAÇÃO") ||
+      upper.includes("DATA DA CALIBRACAO")
+    ) {
+      modoEscala = "";
+    }
+
+    const numeros = numerosDaLinhaEscala(linha);
+    if (numeros.length >= 3) {
+      linhasEscala.push({
+        indice,
+        pagina: Number(linha?.pagina || 0),
+        modo: modoEscala,
+        numeros
+      });
+    }
+  }
 
   function montarPonto(indicado, padrao, erro, incerteza, ponto) {
     return {
@@ -2492,7 +2513,11 @@ function extrairTabelaDLHEscala(linhas) {
 
   function procurarPonto(padroes, indice, tipo, linhasDisponiveis) {
     const padraoEsperado = padroes[indice];
-    for (const linha of linhasDisponiveis) {
+    const linhasOrdenadas = [
+      ...linhasDisponiveis.filter(linha => linha.modo === tipo),
+      ...linhasDisponiveis.filter(linha => linha.modo !== tipo)
+    ];
+    for (const linha of linhasOrdenadas) {
       const candidato = candidatosDaSequencia(
         linha.numeros,
         tipo,
@@ -2503,6 +2528,39 @@ function extrairTabelaDLHEscala(linhas) {
       }
     }
     return null;
+  }
+
+  function buscarGrupoDinamico(tipo, quantidade, linhasBase) {
+    const candidatos = linhasBase
+      .flatMap(linha => {
+        const candidatosLinha = candidatosDaSequencia(linha.numeros, tipo)
+          .sort((a, b) => a.residuo - b.residuo);
+        const candidato = candidatosLinha[0];
+        return candidato
+          ? [{ ...candidato, linhaIndice: linha.indice, pagina: linha.pagina }]
+          : [];
+      })
+      .filter(candidato => tipo === "UMIDADE"
+        ? candidato.padrao >= 5 && candidato.padrao <= 100
+        : candidato.padrao >= -40 && candidato.padrao <= 80
+      )
+      .sort((a, b) => a.linhaIndice - b.linhaIndice || a.inicio - b.inicio);
+
+    for (let inicio = 0; inicio <= candidatos.length - quantidade; inicio++) {
+      const grupo = candidatos.slice(inicio, inicio + quantidade);
+      const mesmaPagina = grupo.every(ponto => ponto.pagina === grupo[0].pagina);
+      const linhasDistintas = new Set(grupo.map(ponto => ponto.linhaIndice)).size === quantidade;
+      const padroesCrescentes = grupo.every((ponto, indice) => (
+        indice === 0 || ponto.padrao > grupo[indice - 1].padrao
+      ));
+      const faixaSuficiente = grupo[quantidade - 1].padrao - grupo[0].padrao >= 10;
+
+      if (mesmaPagina && linhasDistintas && padroesCrescentes && faixaSuficiente) {
+        return grupo;
+      }
+    }
+
+    return [];
   }
 
   // A temperatura é identificada primeiro e suas linhas ficam reservadas.
@@ -2530,6 +2588,34 @@ function extrairTabelaDLHEscala(linhas) {
       candidato.incerteza,
       pontosTemperatura.length + 1
     ));
+  }
+
+  let formaTemperatura = "padroes_fixos";
+  if (pontosTemperatura.length < padroesTemperatura.length) {
+    const linhasTemperatura = linhasEscala.filter(linha => linha.modo === "TEMPERATURA");
+    const linhasBaseTemperatura = linhasTemperatura.length >= padroesTemperatura.length
+      ? linhasTemperatura
+      : linhasEscala.filter(linha => !linhasUsadasTemperatura.has(linha.indice));
+    const grupoTemperatura = buscarGrupoDinamico(
+      "TEMPERATURA",
+      padroesTemperatura.length,
+      linhasBaseTemperatura
+    );
+
+    if (grupoTemperatura.length === padroesTemperatura.length) {
+      pontosTemperatura.length = 0;
+      for (const candidato of grupoTemperatura) {
+        pontosTemperatura.push(montarPonto(
+          candidato.indicado,
+          candidato.padrao,
+          candidato.erro,
+          candidato.incerteza,
+          pontosTemperatura.length + 1
+        ));
+        linhasUsadasTemperatura.add(candidato.linhaIndice);
+      }
+      formaTemperatura = "padroes_extraidos_da_tabela";
+    }
   }
 
   const linhasDisponiveisUmidade = linhasEscala.filter(
@@ -2566,32 +2652,19 @@ function extrairTabelaDLHEscala(linhas) {
   // Layouts novos podem usar, por exemplo, 30/50/70 ou 35/50/75 %UR.
   // Nesse caso os próprios valores da coluna padrão são a referência correta.
   if (pontosUmidade.length < padroesUmidade.length) {
-    const candidatosUmidade = linhasDisponiveisUmidade
-      .flatMap(linha => {
-        const candidatos = candidatosDaSequencia(linha.numeros, "UMIDADE")
-          .sort((a, b) => a.residuo - b.residuo);
-        const candidato = candidatos[0];
-        return candidato
-          ? [{ ...candidato, linhaIndice: linha.indice, pagina: linha.pagina }]
-          : [];
-      })
-      .filter(candidato => candidato.padrao >= 5 && candidato.padrao <= 100)
-      .sort((a, b) => a.linhaIndice - b.linhaIndice || a.inicio - b.inicio);
+    const linhasUmidade = linhasDisponiveisUmidade.filter(linha => linha.modo === "UMIDADE");
+    const linhasBaseUmidade = linhasUmidade.length >= padroesUmidade.length
+      ? linhasUmidade
+      : linhasDisponiveisUmidade;
+    const grupoUmidade = buscarGrupoDinamico(
+      "UMIDADE",
+      padroesUmidade.length,
+      linhasBaseUmidade
+    );
 
-    for (let inicio = 0; inicio <= candidatosUmidade.length - 3; inicio++) {
-      const grupo = candidatosUmidade.slice(inicio, inicio + 3);
-      const mesmaPagina = grupo.every(ponto => ponto.pagina === grupo[0].pagina);
-      const linhasDistintas = new Set(grupo.map(ponto => ponto.linhaIndice)).size === 3;
-      const padroesCrescentes = grupo[0].padrao < grupo[1].padrao &&
-        grupo[1].padrao < grupo[2].padrao;
-      const faixaSuficiente = grupo[2].padrao - grupo[0].padrao >= 10;
-
-      if (!mesmaPagina || !linhasDistintas || !padroesCrescentes || !faixaSuficiente) {
-        continue;
-      }
-
+    if (grupoUmidade.length === padroesUmidade.length) {
       pontosUmidade.length = 0;
-      for (const candidato of grupo) {
+      for (const candidato of grupoUmidade) {
         pontosUmidade.push(montarPonto(
           candidato.indicado,
           candidato.padrao,
@@ -2601,7 +2674,6 @@ function extrairTabelaDLHEscala(linhas) {
         ));
       }
       formaUmidade = "padroes_extraidos_da_tabela";
-      break;
     }
   }
 
@@ -2617,6 +2689,7 @@ function extrairTabelaDLHEscala(linhas) {
       motivo: "Formato alternativo por colunas posicionadas",
       umidade_encontrada: pontosUmidade.length,
       temperatura_encontrada: pontosTemperatura.length,
+      forma_temperatura: formaTemperatura,
       forma_umidade: formaUmidade,
       padroes_umidade: pontosUmidade.map(ponto => ponto.padrao),
       linhas_temperatura: [...linhasUsadasTemperatura]
