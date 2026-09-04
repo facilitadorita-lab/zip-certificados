@@ -99,7 +99,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v4";
+const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v5";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
