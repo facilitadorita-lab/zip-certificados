@@ -272,6 +272,27 @@ function supabaseHeaders() {
   return headers;
 }
 
+function normalizarPontosDLH(valor) {
+  let atual = valor;
+  for (let tentativa = 0; tentativa < 4; tentativa += 1) {
+    if (Array.isArray(atual)) return atual;
+    if (typeof atual === "string") {
+      try {
+        atual = JSON.parse(atual);
+        continue;
+      } catch (_) {
+        return [];
+      }
+    }
+    if (atual && typeof atual === "object") {
+      atual = atual.pontos || atual.pontos_calibracao || atual.items;
+      continue;
+    }
+    break;
+  }
+  return [];
+}
+
 function escaparHtmlSuporte(valor) {
   return String(valor ?? "")
     .replace(/&/g, "&amp;")
@@ -4771,8 +4792,13 @@ app.get("/dlh/certificados/:id/detalhes", async (req, res) => {
       return res.status(404).json({ erro: "Certificado DLH não encontrado" });
     }
 
-    res.setHeader("Cache-Control", "private, max-age=3600");
-    res.json(registros[0]);
+    const registro = registros[0];
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.json({
+      ...registro,
+      pontos_umidade: normalizarPontosDLH(registro.pontos_umidade),
+      pontos_temperatura: normalizarPontosDLH(registro.pontos_temperatura)
+    });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
