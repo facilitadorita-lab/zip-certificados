@@ -99,7 +99,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v5";
+const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v6";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -3024,15 +3024,38 @@ async function extrairTabelaDLH(buffer) {
 
   if (pontosUmidade.length < 3 || pontosTemperatura.length < 4) {
     const alternativa = extrairTabelaDLHEscala(linhas);
-    if (alternativa.ok) return alternativa;
+    const pontosUmidadeFinais = pontosUmidade.length >= 3
+      ? pontosUmidade
+      : alternativa.pontos_umidade || [];
+    const pontosTemperaturaFinais = pontosTemperatura.length >= 4
+      ? pontosTemperatura
+      : alternativa.pontos_temperatura || [];
+
+    // Os leitores podem complementar um ao outro: o parser principal pode
+    // reconhecer toda a umidade enquanto o leitor alternativo reconhece toda
+    // a temperatura. Não descartamos uma combinação completa e válida.
+    if (pontosUmidadeFinais.length >= 3 && pontosTemperaturaFinais.length >= 4) {
+      return {
+        ok: true,
+        pontos_umidade: pontosUmidadeFinais.slice(0, 3),
+        pontos_temperatura: pontosTemperaturaFinais.slice(0, 4),
+        debug: {
+          parser: "principal+escala_layout",
+          motivo: "Leitores complementares do mesmo certificado",
+          umidade_encontrada: pontosUmidadeFinais.length,
+          temperatura_encontrada: pontosTemperaturaFinais.length,
+          alternativa
+        }
+      };
+    }
 
     const umidadeAlternativa = Number(alternativa.debug?.umidade_encontrada || 0);
     const temperaturaAlternativa = Number(alternativa.debug?.temperatura_encontrada || 0);
 
     return {
       ok: false,
-      pontos_umidade: pontosUmidade,
-      pontos_temperatura: pontosTemperatura,
+      pontos_umidade: pontosUmidadeFinais,
+      pontos_temperatura: pontosTemperaturaFinais,
       debug: {
         parser: "principal+escala_layout",
         motivo: "Quantidade insuficiente de pontos DLH",
