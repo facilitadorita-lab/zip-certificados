@@ -96,7 +96,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v3";
+const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v4";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -2537,7 +2537,12 @@ function extrairTabelaDLHEscala(linhas) {
           .sort((a, b) => a.residuo - b.residuo);
         const candidato = candidatosLinha[0];
         return candidato
-          ? [{ ...candidato, linhaIndice: linha.indice, pagina: linha.pagina }]
+          ? [{
+            ...candidato,
+            linhaIndice: linha.indice,
+            pagina: linha.pagina,
+            modo: linha.modo
+          }]
           : [];
       })
       .filter(candidato => tipo === "UMIDADE"
@@ -2549,13 +2554,19 @@ function extrairTabelaDLHEscala(linhas) {
     for (let inicio = 0; inicio <= candidatos.length - quantidade; inicio++) {
       const grupo = candidatos.slice(inicio, inicio + quantidade);
       const mesmaPagina = grupo.every(ponto => ponto.pagina === grupo[0].pagina);
+      const grupoIdentificado = grupo.every(ponto => ponto.modo === tipo);
       const linhasDistintas = new Set(grupo.map(ponto => ponto.linhaIndice)).size === quantidade;
       const padroesCrescentes = grupo.every((ponto, indice) => (
         indice === 0 || ponto.padrao > grupo[indice - 1].padrao
       ));
       const faixaSuficiente = grupo[quantidade - 1].padrao - grupo[0].padrao >= 10;
 
-      if (mesmaPagina && linhasDistintas && padroesCrescentes && faixaSuficiente) {
+      // A tabela pode continuar na página seguinte. Só permitimos essa
+      // transição quando todas as linhas foram identificadas pelo cabeçalho
+      // do mesmo tipo, evitando misturar tabelas distintas do certificado.
+      const paginaContinuaTabela = mesmaPagina || grupoIdentificado;
+
+      if (paginaContinuaTabela && linhasDistintas && padroesCrescentes && faixaSuficiente) {
         return grupo;
       }
     }
