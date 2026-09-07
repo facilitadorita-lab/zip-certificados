@@ -28,6 +28,9 @@ Cadastre os valores indicados em .env.example na tela Environment do Render.
 FALLBACK DE LEITURA DLH COM IA
 - O parser original continua sendo sempre a primeira tentativa.
 - O leitor de layout alternativo e tentado somente quando o original nao retorna 3 pontos de umidade e 4 de temperatura.
+- Quando o parser original falha, o backend tenta os layouts aprendidos na tabela parser_layouts_dlh antes de chamar a IA.
+- A IA retorna os pontos e um mapa validado do layout; esse mapa e salvo como uma nova versao e nunca remove o parser original ou layouts anteriores.
+- Execute a migration 20260907090000_layouts_aprendidos_dlh.sql no Supabase antes de ativar o aprendizado em producao.
 - A IA so e chamada quando OPENAI_API_KEY estiver configurada; sem essa chave o backend segue funcionando apenas com os parsers locais.
 - OPENAI_DLH_MODEL: modelo usado no fallback, padrao gpt-4.1-mini.
 - DLH_AI_FALLBACK_ENABLED: true ou false, padrao true.
@@ -36,6 +39,7 @@ FALLBACK DE LEITURA DLH COM IA
 - PROCESSAMENTO_ARQUIVO_TIMEOUT_MS: limite total para processar um PDF, padrao 150000.
 - EXTERNAL_REQUEST_TIMEOUT_MS: limite geral para chamadas externas, padrao 60000.
 - A IA precisa retornar o conjunto completo; pontos parciais sao descartados e nao alteram o resultado do parser original.
+- O retorno da IA e aceito somente com 3 pontos de umidade e 4 pontos de temperatura coerentes; layouts invalidos nao sao gravados.
 - Falhas de download, leitura ou gravacao ficam registradas como ERRO para o lote finalizar e poder ser reprocessado depois.
 
 SUPORTE POR E-MAIL E TELEGRAM

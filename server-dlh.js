@@ -14,6 +14,11 @@ import dns from "dns";
 import { createClient } from "@supabase/supabase-js";
 import { MAPA_LOGGERS_DLH, normalizarDLH } from "./mapa-loggers-dlh.js";
 import { gerarPdfDLH } from "./relatorios-pdf.js";
+import {
+  criarAssinaturaLayoutDLH,
+  normalizarLayoutDLHIA,
+  resumirLinhasParaIADLH
+} from "./layout-dlh.js";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -76,6 +81,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_DLH_MODEL = process.env.OPENAI_DLH_MODEL || "gpt-4.1-mini";
 const DLH_AI_FALLBACK_ENABLED = String(process.env.DLH_AI_FALLBACK_ENABLED || "true") === "true";
 const DLH_AI_TIMEOUT_MS = Number(process.env.DLH_AI_TIMEOUT_MS || 60000);
+const DLH_LAYOUTS_TABLE = "parser_layouts_dlh";
 const DRIVE_REQUEST_TIMEOUT_MS = Number(process.env.DRIVE_REQUEST_TIMEOUT_MS || 45000);
 const PROCESSAMENTO_ARQUIVO_TIMEOUT_MS = Number(process.env.PROCESSAMENTO_ARQUIVO_TIMEOUT_MS || 150000);
 const EXTERNAL_REQUEST_TIMEOUT_MS = Number(process.env.EXTERNAL_REQUEST_TIMEOUT_MS || 60000);
@@ -99,7 +105,7 @@ const AUTH_ENABLED = String(process.env.AUTH_ENABLED || "false") === "true";
 const AUTH_CACHE_MS = Number(process.env.AUTH_CACHE_MS || 300000);
 const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 300000);
 const AUTOMATION_SECRET = process.env.AUTOMATION_SECRET || "";
-const BACKEND_VERSION = "assistente-backend-2026-09-03-dlh-parser-v6";
+const BACKEND_VERSION = "assistente-backend-2026-09-07-dlh-layouts-ia-v7";
 const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.com";
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
@@ -118,6 +124,7 @@ const CERTIFICADOS_DLH_LISTA_SELECT = [
 let statusCacheDLH = { expiraEm: 0, valor: null };
 let idsBancoCacheDLH = { expiraEm: 0, valor: null };
 let idsExcluidosCacheDLH = { expiraEm: 0, valor: null };
+const layoutsDLHCache = new Map();
 let syncLocalDLHEmExecucao = false;
 let reprocessJobDLH = null;
 let criteriosCacheDLH = { expiraEm: 0, valor: null };
@@ -808,6 +815,93 @@ function dividirEmLotes(lista, tamanho = 100) {
 
 function invalidarCachesDLH() {
   statusCacheDLH = { expiraEm: 0, valor: null };
+}
+
+async function buscarLayoutsDLH(assinatura) {
+  if (!assinatura) return [];
+  const cacheAtual = layoutsDLHCache.get(assinatura);
+  if (cacheAtual && cacheAtual.expiraEm > Date.now()) return cacheAtual.valor;
+
+  try {
+    const params = new URLSearchParams({
+      select: "id,assinatura,nome,config_json,origem,modelo_ia,ativo,confianca,sucessos,ultima_utilizacao",
+      assinatura: `eq.${assinatura}`,
+      ativo: "eq.true",
+      order: "sucessos.desc,ultima_utilizacao.desc",
+      limit: "10"
+    });
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${DLH_LAYOUTS_TABLE}?${params}`, {
+      headers: supabaseHeaders()
+    });
+    const data = await response.json().catch(() => []);
+
+    // A tabela é criada pela migração. Enquanto ela não existir, o parser
+    // original continua funcionando sem transformar isso em erro de certificado.
+    if (response.status === 404 || response.status === 400) {
+      layoutsDLHCache.set(assinatura, { valor: [], expiraEm: Date.now() + 30000 });
+      return [];
+    }
+    const layouts = validarListaSupabase(response, data, `Supabase ${DLH_LAYOUTS_TABLE}`);
+    layoutsDLHCache.set(assinatura, { valor: layouts, expiraEm: Date.now() + 300000 });
+    return layouts;
+  } catch (erro) {
+    console.log("Layouts DLH aprendidos indisponíveis:", textoCurtoErroDLH(erro.message));
+    layoutsDLHCache.set(assinatura, { valor: [], expiraEm: Date.now() + 30000 });
+    return [];
+  }
+}
+
+async function salvarLayoutDLH({ assinatura, layout, modelo }) {
+  if (!assinatura || !layout) return null;
+
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/${DLH_LAYOUTS_TABLE}?on_conflict=assinatura`,
+      {
+        method: "POST",
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "resolution=merge-duplicates,return=representation"
+        },
+        body: JSON.stringify({
+          assinatura,
+          nome: layout.nome || "Layout DLH aprendido",
+          estrategia: layout.estrategia || "colunas_posicionadas",
+          config_json: layout,
+          origem: "IA",
+          modelo_ia: modelo || OPENAI_DLH_MODEL,
+          ativo: true,
+          confianca: 0.85,
+          ultima_utilizacao: new Date().toISOString(),
+          atualizado_em: new Date().toISOString()
+        })
+      }
+    );
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      console.log("Não foi possível salvar o layout DLH aprendido:", textoCurtoErroDLH(data?.message || data?.error));
+      return null;
+    }
+
+    layoutsDLHCache.delete(assinatura);
+    return Array.isArray(data) ? data[0] || null : data;
+  } catch (erro) {
+    console.log("Falha ao salvar layout DLH aprendido:", textoCurtoErroDLH(erro.message));
+    return null;
+  }
+}
+
+async function registrarUsoLayoutDLH(layout) {
+  if (!layout?.id) return;
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/${DLH_LAYOUTS_TABLE}?id=eq.${encodeURIComponent(layout.id)}`, {
+      method: "PATCH",
+      headers: { ...supabaseHeaders(), Prefer: "return=minimal" },
+      body: JSON.stringify({ ultima_utilizacao: new Date().toISOString() })
+    });
+  } catch (_) {
+    // O uso do layout não pode interromper o processamento do certificado.
+  }
 }
 
 async function contarTabela(tabela) {
@@ -2415,9 +2509,13 @@ function identificarModoTabelaDLH(textoLinha) {
 
 // Segundo leitor para certificados do layout Escala, nos quais a tabela
 // aparece como colunas posicionadas e não possui os títulos do formato atual.
-function extrairTabelaDLHEscala(linhas) {
-  const padroesUmidade = [10, 50, 90];
-  const padroesTemperatura = [-20, 0, 15, 60];
+function extrairTabelaDLHEscala(linhas, opcoes = {}) {
+  const padroesUmidade = Array.isArray(opcoes.padroesUmidade) && opcoes.padroesUmidade.length === 3
+    ? opcoes.padroesUmidade.map(Number)
+    : [10, 50, 90];
+  const padroesTemperatura = Array.isArray(opcoes.padroesTemperatura) && opcoes.padroesTemperatura.length === 4
+    ? opcoes.padroesTemperatura.map(Number)
+    : [-20, 0, 15, 60];
 
   const numerosDaLinhaEscala = linha => (linha?.items || [])
     .filter(item => somenteNumeroBR(item.text))
@@ -2756,6 +2854,36 @@ function extrairTabelaDLHEscala(linhas) {
       forma_umidade: formaUmidade,
       padroes_umidade: pontosUmidade.map(ponto => ponto.padrao),
       linhas_temperatura: [...linhasUsadasTemperatura]
+    }
+  };
+}
+
+function extrairTabelaDLHComLayoutAprendido(linhas, registro) {
+  let config = registro?.config_json || registro?.config || registro;
+  if (typeof config === "string") {
+    try {
+      config = JSON.parse(config);
+    } catch (_) {
+      return { ok: false, pontos_umidade: [], pontos_temperatura: [] };
+    }
+  }
+
+  const layout = normalizarLayoutDLHIA(config);
+  if (!layout) return { ok: false, pontos_umidade: [], pontos_temperatura: [] };
+
+  const resultado = extrairTabelaDLHEscala(linhas, {
+    padroesUmidade: layout.padroes_umidade,
+    padroesTemperatura: layout.padroes_temperatura
+  });
+
+  return {
+    ...resultado,
+    debug: {
+      ...(resultado.debug || {}),
+      parser: "layout_aprendido",
+      layout_id: registro?.id || null,
+      layout_nome: layout.nome,
+      layout_estrategia: layout.estrategia
     }
   };
 }
@@ -3113,7 +3241,7 @@ function extrairJSONRespostaDLHIA(texto) {
   return JSON.parse(semBloco.slice(inicio, fim + 1));
 }
 
-function validarPontosDLHIA(lista, quantidade, tipo) {
+function validarPontosDLHIA(lista, quantidade, tipo, padroesEsperados = null) {
   if (!Array.isArray(lista) || lista.length < quantidade) return null;
 
   const pontos = lista.slice(0, quantidade).map((item, indice) => {
@@ -3150,7 +3278,10 @@ function validarPontosDLHIA(lista, quantidade, tipo) {
   }
 
   if (tipo === "TEMPERATURA") {
-    for (const [indice, padraoEsperado] of [-20, 0, 15, 60].entries()) {
+    const padroes = Array.isArray(padroesEsperados) && padroesEsperados.length === quantidade
+      ? padroesEsperados
+      : [-20, 0, 15, 60];
+    for (const [indice, padraoEsperado] of padroes.entries()) {
       if (Math.abs(pontos[indice].padrao - padraoEsperado) > 3) return null;
     }
   }
@@ -3169,7 +3300,7 @@ function validarPontosDLHIA(lista, quantidade, tipo) {
   }));
 }
 
-async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
+async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser, linhas = []) {
   if (!DLH_AI_FALLBACK_ENABLED || !OPENAI_API_KEY) {
     return null;
   }
@@ -3197,11 +3328,40 @@ async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
     "Umidade deve ter exatamente 3 pontos e temperatura exatamente 4 pontos.",
     "Use indicado, padrao, erro e incerteza expandida. Se o PDF nao mostrar a coluna padrao, use os padroes tecnicos da tabela.",
     "Normalize o erro como indicado menos padrao e retorne numeros, sem unidades ou texto.",
+    "Alem dos pontos, descreva o layout para reaproveitamento futuro: padroes das colunas, ordem das colunas e estrategia de leitura.",
     "Nao invente pontos. Se uma tabela estiver ilegivel, retorne uma lista vazia para ela.",
     "Retorne exclusivamente o JSON solicitado."
   ].join(" ");
 
   const textoExtraido = String(texto || "").slice(0, 24000);
+  const contextoPosicional = JSON.stringify(resumirLinhasParaIADLH(linhas)).slice(0, 26000);
+  const schemaLayout = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      nome: { type: "string" },
+      estrategia: { type: "string" },
+      padroes_umidade: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 },
+      padroes_temperatura: { type: "array", items: { type: "number" }, minItems: 4, maxItems: 4 },
+      ordem_colunas: {
+        type: "array",
+        items: { type: "string", enum: ["indicado", "padrao", "erro", "incerteza"] },
+        minItems: 1,
+        maxItems: 6
+      },
+      cabecalhos: { type: "array", items: { type: "string" }, maxItems: 20 },
+      observacao: { type: "string" }
+    },
+    required: [
+      "nome",
+      "estrategia",
+      "padroes_umidade",
+      "padroes_temperatura",
+      "ordem_colunas",
+      "cabecalhos",
+      "observacao"
+    ]
+  };
   const body = {
     model: OPENAI_DLH_MODEL,
     input: [
@@ -3214,7 +3374,7 @@ async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
         content: [
           {
             type: "input_text",
-            text: `Texto extraido para apoio:\n${textoExtraido}\n\nDiagnostico do leitor deterministico:\n${JSON.stringify(diagnosticoParser || {})}`
+            text: `Texto extraido para apoio:\n${textoExtraido}\n\nEstrutura posicional das linhas:\n${contextoPosicional}\n\nDiagnostico do leitor deterministico:\n${JSON.stringify(diagnosticoParser || {})}`
           },
           {
             type: "input_file",
@@ -3240,9 +3400,10 @@ async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
             pontos_temperatura: {
               type: "array",
               items: schemaPonto
-            }
+            },
+            layout: schemaLayout
           },
-          required: ["pontos_umidade", "pontos_temperatura"]
+          required: ["pontos_umidade", "pontos_temperatura", "layout"]
         }
       }
     }
@@ -3268,8 +3429,19 @@ async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
       .map(item => item.text || "")
       .join("\n");
     const json = extrairJSONRespostaDLHIA(textoResposta);
-    const pontosUmidade = validarPontosDLHIA(json.pontos_umidade, 3, "UMIDADE");
-    const pontosTemperatura = validarPontosDLHIA(json.pontos_temperatura, 4, "TEMPERATURA");
+    const layout = normalizarLayoutDLHIA(json.layout);
+    const pontosUmidade = validarPontosDLHIA(
+      json.pontos_umidade,
+      3,
+      "UMIDADE",
+      layout?.padroes_umidade
+    );
+    const pontosTemperatura = validarPontosDLHIA(
+      json.pontos_temperatura,
+      4,
+      "TEMPERATURA",
+      layout?.padroes_temperatura
+    );
 
     if (!pontosUmidade || !pontosTemperatura) {
       throw new Error("A IA retornou pontos incompletos ou incoerentes");
@@ -3279,10 +3451,12 @@ async function extrairTabelaDLHComIA(buffer, texto, diagnosticoParser) {
       ok: true,
       pontos_umidade: pontosUmidade,
       pontos_temperatura: pontosTemperatura,
+      layout,
       debug: {
         parser: "ia_fallback",
         modelo: OPENAI_DLH_MODEL,
-        motivo: "Leitor deterministico nao reconheceu o layout"
+        motivo: "Leitor deterministico nao reconheceu o layout",
+        layout_salvavel: Boolean(layout)
       }
     };
   } finally {
@@ -3577,7 +3751,7 @@ function avaliarStatusDLH(pontosUmidade = [], pontosTemperatura = [], criterios 
 async function processarPDFDLH(fileId, nomeArquivo = "") {
   try {
     const buffer = await baixarArquivoDrive(fileId);
-    const { texto } = await extrairTextoELinhasDoPDF(buffer);
+    const { texto, linhas } = await extrairTextoELinhasDoPDF(buffer);
 
     const meta = extrairMetadadosDLH(texto);
     const fallbackNome = extrairDadosNomeArquivo(nomeArquivo);
@@ -3588,12 +3762,40 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
 
     let tabela = await extrairTabelaDLH(buffer);
 
+    const assinaturaLayout = criarAssinaturaLayoutDLH(linhas);
+    let layoutAprendido = null;
+
+    // Só tenta layouts aprendidos quando o parser original não fechou a
+    // leitura. O parser original continua sendo sempre a primeira tentativa.
+    if (!tabela.ok) {
+      const layouts = await buscarLayoutsDLH(assinaturaLayout);
+      for (const layout of layouts) {
+        const tentativa = extrairTabelaDLHComLayoutAprendido(linhas, layout);
+        if (!tentativa.ok) continue;
+
+        tabela = tentativa;
+        layoutAprendido = layout;
+        await registrarUsoLayoutDLH(layout);
+        break;
+      }
+    }
+
     // A IA so e consultada quando os leitores deterministico e alternativo
-    // nao entregam o conjunto completo. Um resultado parcial nunca e aceito.
+    // e os layouts aprendidos nao entregam o conjunto completo. Um resultado
+    // parcial nunca e aceito.
     if (!tabela.ok && DLH_AI_FALLBACK_ENABLED && OPENAI_API_KEY) {
       try {
-        const tabelaIA = await extrairTabelaDLHComIA(buffer, texto, tabela.debug);
-        if (tabelaIA?.ok) tabela = tabelaIA;
+        const tabelaIA = await extrairTabelaDLHComIA(buffer, texto, tabela.debug, linhas);
+        if (tabelaIA?.ok) {
+          tabela = tabelaIA;
+          if (tabelaIA.layout) {
+            await salvarLayoutDLH({
+              assinatura: assinaturaLayout,
+              layout: tabelaIA.layout,
+              modelo: tabelaIA.debug?.modelo
+            });
+          }
+        }
       } catch (erroIA) {
         tabela = {
           ...tabela,
@@ -3645,6 +3847,8 @@ async function processarPDFDLH(fileId, nomeArquivo = "") {
       pontos_umidade: pontosUmidadeComResultado,
       pontos_temperatura: pontosTemperaturaComResultado,
       certificado: meta.certificado || "",
+      layout_id: layoutAprendido?.id || null,
+      layout_assinatura: assinaturaLayout,
       criterios_aceitacao: {
         limite_temperatura: avaliacao.limite_temperatura,
         limite_umidade: avaliacao.limite_umidade
