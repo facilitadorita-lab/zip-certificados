@@ -17,7 +17,10 @@ create table if not exists public.parser_layouts_dlh (
   atualizado_em timestamptz not null default now()
 );
 
+grant all on public.parser_layouts_dlh to service_role;
+
 create index if not exists parser_layouts_dlh_ativo_assinatura_idx
   on public.parser_layouts_dlh (ativo, assinatura);
 
 alter table public.parser_layouts_dlh enable row level security;
+
