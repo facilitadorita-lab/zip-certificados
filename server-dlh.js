@@ -49,7 +49,10 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", origem);
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Movimentacao-Session"
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -62,6 +65,134 @@ app.use((req, _res, next) => {
     );
   }
   next();
+});
+
+// Leitura assistida das etiquetas frontais dos loggers no modo de movimentacao.
+// A rota nao grava nada: apenas devolve sugestoes para confirmacao humana.
+app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
+  try {
+    if (!OPENAI_API_KEY) {
+      return res.status(503).json({ erro: "Leitura por IA indisponivel no momento." });
+    }
+
+    const imagem = String(req.body?.imagem_data_url || "");
+    const sessao = String(req.headers["x-movimentacao-session"] || "");
+    if (sessao.length < 32) return res.status(401).json({ erro: "Sessao de movimentacao invalida." });
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return res.status(503).json({ erro: "Banco de movimentacoes indisponivel." });
+    }
+    const validacaoSessao = await fetch(`${SUPABASE_URL}/rest/v1/rpc/sessao_movimentacao_valida`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ p_token: sessao })
+    });
+    const sessaoValida = await validacaoSessao.json().catch(() => false);
+    if (!validacaoSessao.ok || sessaoValida !== true) {
+      return res.status(401).json({ erro: "Sessao de movimentacao expirada." });
+    }
+    if (!/^data:image\/(?:jpeg|jpg|png|webp);base64,/i.test(imagem) || imagem.length > 700000) {
+      return res.status(400).json({ erro: "Envie uma foto JPG, PNG ou WEBP de ate 700 KB." });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const resposta = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: OPENAI_DLH_MODEL,
+          input: [
+            {
+              role: "system",
+              content: [{
+                type: "input_text",
+                text: [
+                  "Voce identifica etiquetas frontais de data loggers.",
+                  "Leia somente codigos que comecem por DLT- ou DLH-.",
+                  "Retorne uma lista vazia quando a etiqueta estiver ilegivel.",
+                  "Nao invente numeros e nao leia numeros de certificados, datas ou textos ao redor.",
+                  "Retorne exclusivamente o JSON solicitado."
+                ].join(" ")
+              }]
+            },
+            {
+              role: "user",
+              content: [
+                { type: "input_text", text: "Identifique todas as etiquetas de logger visiveis nesta foto." },
+                { type: "input_image", image_url: imagem, detail: "high" }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "identificacao_loggers",
+              strict: true,
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  loggers: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        codigo: { type: "string" },
+                        confianca: { type: "number", minimum: 0, maximum: 1 },
+                        observacao: { type: "string" }
+                      },
+                      required: ["codigo", "confianca", "observacao"]
+                    }
+                  }
+                },
+                required: ["loggers"]
+              }
+            }
+          }
+        }),
+        signal: controller.signal
+      });
+      const dados = await resposta.json();
+      if (!resposta.ok) {
+        return res.status(502).json({ erro: `Falha na leitura por IA: ${String(dados?.error?.message || "servico indisponivel")}` });
+      }
+
+      const textoResposta = dados.output_text || (dados.output || [])
+        .flatMap(item => item.content || [])
+        .map(item => item.text || "")
+        .join("\n");
+      const json = extrairJSONRespostaDLHIA(textoResposta);
+      const vistos = new Set();
+      const loggers = (Array.isArray(json?.loggers) ? json.loggers : [])
+        .map(item => {
+          const bruto = String(item?.codigo || "").toUpperCase();
+          const match = bruto.match(/\b(DLT|DLH)[\s-]*([A-Z0-9]{2,})\b/i);
+          if (!match) return null;
+          const codigo = match[2].replace(/[^A-Z0-9]/g, "");
+          const chave = `${match[1].toUpperCase()}-${codigo}`;
+          if (!codigo || vistos.has(chave)) return null;
+          vistos.add(chave);
+          return {
+            modulo: match[1].toUpperCase(),
+            codigo,
+            confianca: Math.max(0, Math.min(1, Number(item?.confianca || 0))),
+            observacao: String(item?.observacao || "")
+          };
+        })
+        .filter(Boolean);
+
+      return res.json({ ok: true, loggers });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    return res.status(500).json({ erro: error?.name === "AbortError" ? "A leitura demorou demais." : "Não foi possível interpretar a foto." });
+  }
 });
 
 const __filename = fileURLToPath(import.meta.url);
