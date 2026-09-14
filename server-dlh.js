@@ -67,8 +67,8 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Leitura assistida das etiquetas frontais dos loggers no modo de movimentacao.
-// A rota nao grava nada: apenas devolve sugestoes para confirmacao humana.
+// Fallback por IA para etiquetas frontais. O aplicativo tenta OCR local antes
+// de chamar esta rota; aqui a IA só devolve uma sugestão para confirmação humana.
 app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
   try {
     if (!OPENAI_API_KEY) {
@@ -112,7 +112,8 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
                 type: "input_text",
                 text: [
                   "Voce identifica etiquetas frontais de data loggers.",
-                  "Leia somente codigos que comecem por DLT- ou DLH-.",
+                  "O padrão válido é exatamente DLT-0000 ou DLH-0000: prefixo DLT ou DLH, hífen opcional e quatro dígitos.",
+                  "Antes de responder, procure visualmente esse padrão na etiqueta; não trate o número de série ou certificado como TAG.",
                   "Retorne uma lista vazia quando a etiqueta estiver ilegivel.",
                   "Nao invente numeros e nao leia numeros de certificados, datas ou textos ao redor.",
                   "Retorne exclusivamente o JSON solicitado."
@@ -142,7 +143,7 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
                       type: "object",
                       additionalProperties: false,
                       properties: {
-                        codigo: { type: "string" },
+                        codigo: { type: "string", pattern: "^(DLT|DLH)-[0-9]{4}$" },
                         confianca: { type: "number", minimum: 0, maximum: 1 },
                         observacao: { type: "string" }
                       },
@@ -186,7 +187,7 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
         })
         .filter(Boolean);
 
-      return res.json({ ok: true, loggers });
+      return res.json({ ok: true, origem: "ia", loggers });
     } finally {
       clearTimeout(timeout);
     }
