@@ -113,10 +113,13 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
                 text: [
                   "Voce identifica etiquetas frontais de data loggers.",
                   "O padrão válido é exatamente DLT-0000 ou DLH-0000: prefixo DLT ou DLH, hífen opcional e quatro dígitos.",
+                  "Examine cada etiqueta separadamente e faça duas conferências visuais dos quatro dígitos antes de responder.",
                   "Antes de responder, procure visualmente esse padrão na etiqueta; não trate o número de série ou certificado como TAG.",
-                  "Retorne uma lista vazia quando a etiqueta estiver ilegivel.",
-                  "Nao invente numeros e nao leia numeros de certificados, datas ou textos ao redor.",
-                  "Retorne exclusivamente o JSON solicitado."
+                  "Só coloque um item em loggers quando o prefixo e os quatro dígitos estiverem nítidos e confirmáveis.",
+                  "Se qualquer dígito puder ser confundido, não escolha um número: coloque a leitura em incertos e, se possível, informe as alternativas.",
+                  "Nunca invente, complete ou corrija um dígito por contexto. Retorne uma lista vazia quando a etiqueta estiver ilegível.",
+                  "Nao leia numeros de certificados, datas ou textos ao redor.",
+                  "Retorne exclusivamente o JSON solicitado.",
                 ].join(" ")
               }]
             },
@@ -149,9 +152,25 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
                       },
                       required: ["codigo", "confianca", "observacao"]
                     }
+                  },
+                  incertos: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      properties: {
+                        texto: { type: "string" },
+                        candidatos: {
+                          type: "array",
+                          items: { type: "string", pattern: "^(DLT|DLH)-[0-9]{4}$" }
+                        },
+                        observacao: { type: "string" }
+                      },
+                      required: ["texto", "candidatos", "observacao"]
+                    }
                   }
                 },
-                required: ["loggers"]
+                required: ["loggers", "incertos"]
               }
             }
           }
@@ -175,6 +194,7 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
           const match = bruto.match(/\b(DLT|DLH)[\s-]*([A-Z0-9]{2,})\b/i);
           if (!match) return null;
           const codigo = match[2].replace(/[^A-Z0-9]/g, "");
+          if (!/^\d{4}$/.test(codigo)) return null;
           const chave = `${match[1].toUpperCase()}-${codigo}`;
           if (!codigo || vistos.has(chave)) return null;
           vistos.add(chave);
@@ -187,7 +207,17 @@ app.post("/dlh/movimentacoes/identificar-tag", async (req, res) => {
         })
         .filter(Boolean);
 
-      return res.json({ ok: true, origem: "ia", loggers });
+      const incertos = (Array.isArray(json?.incertos) ? json.incertos : [])
+        .map(item => ({
+          texto: String(item?.texto || "").trim(),
+          candidatos: (Array.isArray(item?.candidatos) ? item.candidatos : [])
+            .map(candidato => String(candidato || "").toUpperCase().trim())
+            .filter(candidato => /^(DLT|DLH)-\d{4}$/.test(candidato)),
+          observacao: String(item?.observacao || "").trim()
+        }))
+        .filter(item => item.texto || item.candidatos.length || item.observacao);
+
+      return res.json({ ok: true, origem: "ia", loggers, incertos });
     } finally {
       clearTimeout(timeout);
     }
