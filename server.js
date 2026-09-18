@@ -98,6 +98,14 @@ const SUPPORT_TO_EMAIL = process.env.SUPPORT_TO_EMAIL || "contato@calibraflow.co
 const SUPPORT_FROM_EMAIL =
   process.env.SUPPORT_FROM_EMAIL || "CalibraFlow <contato@calibraflow.com>";
 const SUPPORT_RESEND_API_KEY = process.env.SUPPORT_RESEND_API_KEY || process.env.RESEND_API_KEY || "";
+const ALERTAS_RESEND_API_KEY = process.env.ALERTAS_RESEND_API_KEY || SUPPORT_RESEND_API_KEY;
+const ALERTAS_FROM_EMAIL = process.env.ALERTAS_FROM_EMAIL || SUPPORT_FROM_EMAIL;
+const ALERTAS_AUTO_ENABLED = String(process.env.ALERTAS_AUTO_ENABLED || "true") === "true";
+const ALERTAS_AUTO_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.ALERTAS_AUTO_INTERVAL_MS || 15 * 60 * 1000)
+);
+const ALERTAS_MAX_ITENS_EMAIL = Math.max(50, Math.min(1000, Number(process.env.ALERTAS_MAX_ITENS_EMAIL || 500)));
 const limparConfiguracao = (valor) => String(valor || "")
   .trim()
   .replace(/^['"]|['"]$/g, "");
@@ -368,6 +376,7 @@ function papeisPermitidos(req) {
   if (rota.startsWith("/metricas")) return ["dev"];
   if (rota.startsWith("/auditoria")) return ["dev", "administrador"];
   if (rota.startsWith("/usuarios")) return ["dev", "administrador"];
+  if (rota.startsWith("/alertas")) return ["dev", "administrador"];
   if (
     metodo === "DELETE" ||
     rota === "/sync" ||
@@ -396,6 +405,8 @@ function identificarAcaoAuditoria(metodo, rota) {
   if (metodo === "GET" && rota.startsWith("/download/")) return ["DOWNLOAD_CERTIFICADO", "Certificado DLT baixado"];
   if (metodo === "GET" && rota === "/relatorio-dia") return ["GERAR_RELATORIO", "Relatório diário DLT gerado"];
   if (metodo === "POST" && rota === "/suporte/tickets") return ["ABRIR_TICKET", "Ticket de suporte DLT aberto"];
+  if (metodo === "PATCH" && rota === "/alertas/configuracao") return ["CONFIGURAR_ALERTAS", "Configuração de alertas DLT alterada"];
+  if (metodo === "POST" && rota === "/alertas/relatorio") return ["ENVIAR_ALERTA", "Relatório de alertas DLT enviado"];
   return null;
 }
 
@@ -1306,6 +1317,267 @@ async function enviarTelegramTicketSuporte(ticket) {
   }
 
   return { ok: false, aviso: "Falha de comunicacao com o Telegram" };
+}
+
+// ============================================================
+// ALERTAS OPERACIONAIS POR E-MAIL
+// ============================================================
+const MODULOS_ALERTAS = ["DLT", "DLH"];
+const EVENTOS_ALERTAS = ["processados", "reprovados_vencidos"];
+
+function dataLocalHojeISO() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+}
+
+function normalizarModuloAlerta(valor) {
+  const modulo = String(valor || "AMBOS").trim().toUpperCase();
+  return MODULOS_ALERTAS.includes(modulo) || modulo === "AMBOS" ? modulo : "AMBOS";
+}
+
+function normalizarEventosAlerta(valor) {
+  const eventos = Array.isArray(valor) ? valor : EVENTOS_ALERTAS;
+  const resultado = eventos.filter((item) => EVENTOS_ALERTAS.includes(String(item)));
+  return resultado.length ? [...new Set(resultado)] : [...EVENTOS_ALERTAS];
+}
+
+function normalizarEmailsAlerta(valor) {
+  const lista = Array.isArray(valor) ? valor : [];
+  return [...new Set(lista
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))].slice(0, 50);
+}
+
+function escaparHtmlAlerta(valor) {
+  return String(valor ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function listarDestinatariosAlertas() {
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/alertas_email_destinatarios?select=id,email,nome,modulos,eventos,ativo,criado_em,atualizado_em&order=email.asc`,
+    { headers: supabaseHeaders() }
+  );
+  const data = await response.json();
+  return validarListaSupabase(response, data, "Supabase destinatarios de alertas");
+}
+
+async function salvarDestinatariosAlertas(req, registros) {
+  const existentes = await listarDestinatariosAlertas();
+  if (existentes.length) {
+    const ids = existentes.map((item) => encodeURIComponent(item.id)).join(",");
+    const removidos = await fetch(
+      `${SUPABASE_URL}/rest/v1/alertas_email_destinatarios?id=in.(${ids})`,
+      { method: "DELETE", headers: { ...supabaseHeaders(), Prefer: "return=minimal" } }
+    );
+    if (!removidos.ok) throw new Error(`Não foi possível atualizar os destinatários: ${await removidos.text()}`);
+  }
+
+  if (!registros.length) return [];
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/alertas_email_destinatarios`, {
+    method: "POST",
+    headers: { ...supabaseHeaders(), Prefer: "return=representation" },
+    body: JSON.stringify(registros.map((item) => ({
+      email: item.email,
+      nome: item.nome || null,
+      modulos: item.modulos,
+      eventos: item.eventos,
+      ativo: item.ativo !== false,
+      criado_por: req.auth?.user?.id || null
+    })))
+  });
+  const data = await response.json();
+  return validarListaSupabase(response, data, "Supabase atualização de destinatários");
+}
+
+async function consultarCertificadosAlerta(modulo, dataInicio, dataFim) {
+  const tabela = modulo === "DLH" ? "certificados_dlh" : "certificados";
+  const colunaLogger = modulo === "DLH" ? "dlh" : "dlt";
+  const params = new URLSearchParams({
+    select: `${colunaLogger},serie,status,vencimento,validade,criado_em,nome_original,certificado`,
+    order: "criado_em.desc",
+    limit: String(ALERTAS_MAX_ITENS_EMAIL)
+  });
+  if (dataInicio) params.set("criado_em", `gte.${dataInicio}T00:00:00-03:00`);
+  if (dataFim) params.append("criado_em", `lte.${dataFim}T23:59:59.999-03:00`);
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?${params}`, {
+    headers: supabaseHeaders()
+  });
+  const data = await response.json();
+  const registros = validarListaSupabase(response, data, `Supabase certificados ${modulo}`);
+  return registros.map((item) => ({
+    ...item,
+    modulo,
+    logger: item[colunaLogger]
+  }));
+}
+
+function classificarAlertasCertificados(registros) {
+  const hoje = dataLocalHojeISO();
+  const reprovados = registros.filter((item) => String(item.status || "").toUpperCase() === "REPROVADO");
+  const erros = registros.filter((item) => String(item.status || "").toUpperCase() === "ERRO");
+  const vencidos = registros.filter((item) => {
+    const vencimento = String(item.vencimento || "").slice(0, 10);
+    const validade = String(item.validade || "").toUpperCase();
+    return (vencimento && vencimento < hoje) || /VENCID/.test(validade);
+  });
+  return { processados: registros, reprovados, vencidos, erros };
+}
+
+function linhasTabelaAlerta(lista, limite = 80) {
+  if (!lista.length) return `<tr><td colspan="5" style="padding:10px;color:#64748b">Nenhum registro.</td></tr>`;
+  return lista.slice(0, limite).map((item) => `
+    <tr>
+      <td style="padding:7px;border-bottom:1px solid #e2e8f0;font-family:monospace">${escaparHtmlAlerta(item.modulo)}-${escaparHtmlAlerta(item.logger || "-")}</td>
+      <td style="padding:7px;border-bottom:1px solid #e2e8f0">${escaparHtmlAlerta(item.serie || "-")}</td>
+      <td style="padding:7px;border-bottom:1px solid #e2e8f0">${escaparHtmlAlerta(item.status || "-")}</td>
+      <td style="padding:7px;border-bottom:1px solid #e2e8f0">${escaparHtmlAlerta(item.vencimento || "-")}</td>
+      <td style="padding:7px;border-bottom:1px solid #e2e8f0">${escaparHtmlAlerta(item.criado_em || "-")}</td>
+    </tr>`).join("");
+}
+
+function montarHtmlRelatorioAlertas(resultado, eventos, dataInicio, dataFim) {
+  const secao = (titulo, lista) => `
+    <h3 style="margin:22px 0 8px;font-size:15px">${escaparHtmlAlerta(titulo)} (${lista.length})</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#f1f5f9;text-align:left">
+        <th style="padding:7px">Logger</th><th style="padding:7px">Série</th><th style="padding:7px">Status</th><th style="padding:7px">Vencimento</th><th style="padding:7px">Processado em</th>
+      </tr></thead>
+      <tbody>${linhasTabelaAlerta(lista)}</tbody>
+    </table>
+    ${lista.length > 80 ? `<p style="color:#64748b;font-size:12px">Mostrando 80 de ${lista.length} registros nesta seção.</p>` : ""}`;
+
+  const blocos = [];
+  if (eventos.includes("processados")) blocos.push(secao("Certificados processados", resultado.processados));
+  if (eventos.includes("reprovados_vencidos")) {
+    blocos.push(secao("Reprovados", resultado.reprovados));
+    blocos.push(secao("Vencidos", resultado.vencidos));
+    if (resultado.erros.length) blocos.push(secao("Erros de processamento", resultado.erros));
+  }
+  return `<!doctype html><html lang="pt-BR"><body style="margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#102a43">
+    <div style="max-width:900px;margin:24px auto;background:#fff;border:1px solid #dbe3ec">
+      <div style="background:#12355b;padding:22px"><h1 style="margin:0;color:#fff;font-size:22px">Calibra<span style="color:#2dd4bf">Flow</span></h1><p style="margin:8px 0 0;color:#dbeafe">Alertas operacionais e relatório de certificados</p></div>
+      <div style="padding:22px"><p style="margin:0 0 8px"><b>Período:</b> ${escaparHtmlAlerta(dataInicio)} a ${escaparHtmlAlerta(dataFim)}</p>
+        <p style="margin:0;color:#64748b">${resultado.processados.length} processado(s), ${resultado.reprovados.length} reprovado(s), ${resultado.vencidos.length} vencido(s) e ${resultado.erros.length} erro(s).</p>
+        ${blocos.join("")}
+      </div>
+      <div style="padding:14px;text-align:center;background:#f1f5f9;color:#64748b;font-size:12px">CalibraFlow - Gestão de Certificados</div>
+    </div></body></html>`;
+}
+
+async function registrarEnvioAlerta(payload) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/alertas_email_envios`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "resolution=ignore-duplicates,return=minimal" },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    console.warn("Falha ao registrar envio de alerta:", e.message);
+  }
+}
+
+async function enviarRelatorioAlertas({ modulo = "AMBOS", dataInicio, dataFim, eventos, chave, automatico = false }) {
+  validarConfiguracaoBasica();
+  const moduloNormalizado = normalizarModuloAlerta(modulo);
+  const inicio = dataInicio || dataLocalHojeISO();
+  const fim = dataFim || inicio;
+  const eventosNormalizados = normalizarEventosAlerta(eventos);
+  const destinatarios = (await listarDestinatariosAlertas()).filter((item) => {
+    if (item.ativo === false) return false;
+    const modulos = Array.isArray(item.modulos) ? item.modulos : [];
+    const moduloOK = moduloNormalizado === "AMBOS"
+      ? modulos.some((m) => MODULOS_ALERTAS.includes(m))
+      : modulos.includes(moduloNormalizado);
+    return moduloOK && (Array.isArray(item.eventos) ? item.eventos : EVENTOS_ALERTAS)
+      .some((evento) => eventosNormalizados.includes(evento));
+  });
+  const emails = normalizarEmailsAlerta(destinatarios.map((item) => item.email));
+
+  const modules = moduloNormalizado === "AMBOS" ? MODULOS_ALERTAS : [moduloNormalizado];
+  const registros = (await Promise.all(modules.map((m) => consultarCertificadosAlerta(m, inicio, fim)))).flat();
+  const resultado = classificarAlertasCertificados(registros);
+  const idempotencia = chave || `manual-${crypto.randomUUID()}`;
+
+  if (automatico) {
+    const jaEnviado = await fetch(`${SUPABASE_URL}/rest/v1/alertas_email_envios?chave=eq.${encodeURIComponent(idempotencia)}&select=id&limit=1`, { headers: supabaseHeaders() });
+    const existentes = await jaEnviado.json();
+    if (jaEnviado.ok && Array.isArray(existentes) && existentes.length) {
+      return { ok: true, ignorado: true, motivo: "Relatório automático já enviado neste período", total: resultado.processados.length };
+    }
+  }
+
+  const deveEnviar = resultado.processados.length > 0 || resultado.reprovados.length > 0 || resultado.vencidos.length > 0 || resultado.erros.length > 0;
+  if (!deveEnviar || !emails.length) {
+    await registrarEnvioAlerta({
+      chave: idempotencia,
+      modulo: moduloNormalizado,
+      eventos: eventosNormalizados,
+      periodo_inicio: inicio,
+      periodo_fim: fim,
+      total_processados: resultado.processados.length,
+      total_reprovados: resultado.reprovados.length,
+      total_vencidos: resultado.vencidos.length,
+      total_erros: resultado.erros.length,
+      destinatarios: emails.length,
+      status: "ignorado",
+      detalhe: emails.length ? "Nenhum registro no período" : "Nenhum destinatário ativo configurado"
+    });
+    return { ok: true, ignorado: true, motivo: emails.length ? "Nenhum registro no período" : "Nenhum destinatário ativo configurado", destinatarios: emails.length, resultado };
+  }
+  if (!ALERTAS_RESEND_API_KEY) throw new Error("RESEND_API_KEY não configurada no backend");
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ALERTAS_RESEND_API_KEY}`, "Content-Type": "application/json", "Idempotency-Key": idempotencia },
+    body: JSON.stringify({
+      from: ALERTAS_FROM_EMAIL,
+      to: emails,
+      subject: `[CalibraFlow] ${moduloNormalizado} - ${resultado.reprovados.length} reprovado(s), ${resultado.vencidos.length} vencido(s), ${resultado.processados.length} processado(s)`,
+      html: montarHtmlRelatorioAlertas(resultado, eventosNormalizados, inicio, fim)
+    })
+  });
+  if (!response.ok) throw new Error(`Falha ao enviar alerta por e-mail (${response.status}): ${await response.text()}`);
+  const envio = await response.json().catch(() => ({}));
+  await registrarEnvioAlerta({
+    chave: idempotencia,
+    modulo: moduloNormalizado,
+    eventos: eventosNormalizados,
+    periodo_inicio: inicio,
+    periodo_fim: fim,
+    total_processados: resultado.processados.length,
+    total_reprovados: resultado.reprovados.length,
+    total_vencidos: resultado.vencidos.length,
+    total_erros: resultado.erros.length,
+    destinatarios: emails.length,
+    status: "enviado",
+    detalhe: envio?.id || null
+  });
+  return { ok: true, email_enviado: true, destinatarios: emails, resultado, id: envio?.id || null };
+}
+
+async function verificarAlertasAutomaticamente() {
+  if (!ALERTAS_AUTO_ENABLED || !ALERTAS_RESEND_API_KEY) return;
+  const hoje = dataLocalHojeISO();
+  try {
+    await enviarRelatorioAlertas({
+      modulo: "AMBOS",
+      dataInicio: hoje,
+      dataFim: hoje,
+      chave: `automatico-${hoje}`,
+      automatico: true
+    });
+  } catch (e) {
+    console.warn("Falha no alerta automático:", e.message);
+  }
 }
 
 async function abrirTicketSuporte(req, res, modulo) {
@@ -3780,6 +4052,86 @@ app.post("/automacao/sincronizar", async (req, res) => {
   }
 });
 
+app.post("/automacao/alertas-email", async (req, res) => {
+  if (!validarSegredoAutomacao(req, res)) return;
+  try {
+    const hoje = dataLocalHojeISO();
+    const resultado = await enviarRelatorioAlertas({
+      modulo: normalizarModuloAlerta(req.body?.modulo || "AMBOS"),
+      dataInicio: String(req.body?.data_inicio || hoje),
+      dataFim: String(req.body?.data_fim || hoje),
+      eventos: req.body?.eventos,
+      chave: String(req.body?.chave || `automatico-${hoje}`),
+      automatico: true
+    });
+    res.json(resultado);
+  } catch (e) {
+    console.error("Falha na automação de alertas:", e.message);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
+app.get("/alertas/configuracao", async (_req, res) => {
+  try {
+    const destinatarios = await listarDestinatariosAlertas();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, destinatarios });
+  } catch (e) {
+    res.status(500).json({ erro: "Não foi possível carregar a configuração de alertas" });
+  }
+});
+
+app.patch("/alertas/configuracao", async (req, res) => {
+  try {
+    const entrada = Array.isArray(req.body?.destinatarios) ? req.body.destinatarios : [];
+    const vistos = new Set();
+    const destinatarios = [];
+    for (const item of entrada.slice(0, 50)) {
+      const email = String(item?.email || "").trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || vistos.has(email)) continue;
+      vistos.add(email);
+      const modulos = (Array.isArray(item?.modulos) ? item.modulos : MODULOS_ALERTAS)
+        .map((modulo) => String(modulo).toUpperCase())
+        .filter((modulo) => MODULOS_ALERTAS.includes(modulo));
+      const eventos = normalizarEventosAlerta(item?.eventos);
+      destinatarios.push({
+        email,
+        nome: String(item?.nome || "").trim().slice(0, 120) || null,
+        modulos: modulos.length ? [...new Set(modulos)] : [...MODULOS_ALERTAS],
+        eventos,
+        ativo: item?.ativo !== false
+      });
+    }
+    const salvos = await salvarDestinatariosAlertas(req, destinatarios);
+    res.json({ ok: true, destinatarios: salvos });
+  } catch (e) {
+    console.error("Falha ao salvar configuração de alertas:", e.message);
+    res.status(500).json({ erro: "Não foi possível salvar a configuração de alertas" });
+  }
+});
+
+app.post("/alertas/relatorio", async (req, res) => {
+  try {
+    const hoje = dataLocalHojeISO();
+    const dataInicio = String(req.body?.data_inicio || hoje).slice(0, 10);
+    const dataFim = String(req.body?.data_fim || hoje).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInicio) || !/^\d{4}-\d{2}-\d{2}$/.test(dataFim)) {
+      return res.status(400).json({ erro: "Informe um período válido" });
+    }
+    const resultado = await enviarRelatorioAlertas({
+      modulo: normalizarModuloAlerta(req.body?.modulo || "AMBOS"),
+      dataInicio,
+      dataFim,
+      eventos: req.body?.eventos,
+      automatico: false
+    });
+    res.json(resultado);
+  } catch (e) {
+    console.error("Falha ao enviar relatório de alertas:", e.message);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get("/usuarios", async (req, res) => {
   try {
     const response = await fetch(
@@ -5657,5 +6009,10 @@ app.listen(PORT, () => {
         console.log("Erro na agenda de métricas DLT:", e.message);
       });
     }, 60000);
+  }
+
+  if (ALERTAS_AUTO_ENABLED && ALERTAS_RESEND_API_KEY) {
+    setTimeout(() => verificarAlertasAutomaticamente().catch(() => {}), 30000);
+    setInterval(() => verificarAlertasAutomaticamente().catch(() => {}), ALERTAS_AUTO_INTERVAL_MS);
   }
 });
