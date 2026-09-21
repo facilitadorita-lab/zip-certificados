@@ -788,7 +788,7 @@ async function buscarPerfilUsuario(user) {
   if (cache?.expiraEm > Date.now()) return cache.valor;
 
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado`,
+    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado,funcao_id`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json();
@@ -796,8 +796,27 @@ async function buscarPerfilUsuario(user) {
   const perfil = registros[0] || null;
 
   if (!perfil) throw new Error("Perfil de acesso não encontrado");
+  perfil.permissoes = await buscarPermissoesFuncao(perfil.funcao_id);
   profileCache.set(user.id, { valor: perfil, expiraEm: Date.now() + PROFILE_CACHE_MS });
   return perfil;
+}
+
+async function buscarPermissoesFuncao(funcaoId) {
+  if (!funcaoId) return [];
+  const vinculosResponse = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_funcao_permissoes?funcao_id=eq.${encodeURIComponent(funcaoId)}&select=permissao_id`,
+    { headers: supabaseHeaders() }
+  );
+  const vinculos = validarListaSupabase(vinculosResponse, await vinculosResponse.json(), "Supabase permissões da função");
+  const ids = vinculos.map(item => String(item.permissao_id || "")).filter(Boolean);
+  if (!ids.length) return [];
+
+  const permissoesResponse = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_permissoes?id=in.(${ids.map(encodeURIComponent).join(",")})&select=chave`,
+    { headers: supabaseHeaders() }
+  );
+  const permissoes = validarListaSupabase(permissoesResponse, await permissoesResponse.json(), "Supabase permissões");
+  return permissoes.map(item => String(item.chave || "")).filter(Boolean);
 }
 
 async function autenticarToken(token) {
@@ -837,6 +856,24 @@ function papeisPermitidos(req) {
   }
 
   return ["dev", "administrador", "usuario", "auditor"];
+}
+
+function permissaoDaRotaDLH(req) {
+  const rota = req.path;
+  const metodo = req.method;
+  if (rota.startsWith("/dlh/metricas")) return "consumo.visualizar";
+  if (rota.startsWith("/dlh/suporte/tickets")) return "suporte.abrir";
+  if (rota.startsWith("/dlh/divergentes")) return "divergentes.visualizar";
+  if (rota.startsWith("/dlh/relatorios-diarios") || rota.startsWith("/dlh/relatorio-dia")) return "relatorios.visualizar";
+  if (rota.startsWith("/dlh/historico-exclusoes")) return "historico.visualizar";
+  if (rota === "/dlh/sync" || rota === "/dlh/reprocess") return "processamento.executar";
+  if (rota === "/dlh/status" || rota === "/dlh/pendentes" || rota.startsWith("/dlh/criterios")) {
+    return metodo === "PATCH" ? "configuracoes.gerenciar" : "processamento.visualizar";
+  }
+  if (rota.startsWith("/dlh/certificados")) return metodo === "DELETE" ? "certificados.excluir" : "certificados.visualizar";
+  if (rota.startsWith("/dlh/download") || rota.startsWith("/dlh/downloads")) return "certificados.baixar";
+  if (rota.startsWith("/dlh/loggers")) return "movimentacoes.visualizar";
+  return null;
 }
 
 function identificarAcaoAuditoriaDLH(metodo, rota) {
@@ -906,7 +943,12 @@ app.use(async (req, res, next) => {
     if (!token) return res.status(401).json({ erro: "Autenticação obrigatória" });
 
     req.auth = await autenticarToken(token);
-    if (!papeisPermitidos(req).includes(req.auth.perfil.role)) {
+    const permissao = permissaoDaRotaDLH(req);
+    const possuiFuncao = Boolean(req.auth.perfil.funcao_id);
+    const possuiPermissao = !permissao || req.auth.perfil.role === "dev" || req.auth.perfil.role === "administrador"
+      || req.auth.perfil.permissoes?.includes(permissao);
+    const roleLegadoPermitido = papeisPermitidos(req).includes(req.auth.perfil.role);
+    if ((possuiFuncao && !possuiPermissao) || (!possuiFuncao && !roleLegadoPermitido)) {
       return res.status(403).json({ erro: "Você não possui permissão para esta ação" });
     }
     next();

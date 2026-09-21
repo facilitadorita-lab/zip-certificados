@@ -338,7 +338,7 @@ async function buscarPerfilUsuario(user) {
   if (cache?.expiraEm > Date.now()) return cache.valor;
 
   const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado`,
+    `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=id,email,nome,role,ativo,aprovado,funcao_id`,
     { headers: supabaseHeaders() }
   );
   const data = await response.json();
@@ -346,8 +346,49 @@ async function buscarPerfilUsuario(user) {
   const perfil = registros[0] || null;
 
   if (!perfil) throw new Error("Perfil de acesso não encontrado");
+  perfil.permissoes = await buscarPermissoesFuncao(perfil.funcao_id);
   profileCache.set(user.id, { valor: perfil, expiraEm: Date.now() + PROFILE_CACHE_MS });
   return perfil;
+}
+
+async function buscarPermissoesFuncao(funcaoId) {
+  if (!funcaoId) return [];
+  const vinculosResponse = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_funcao_permissoes?funcao_id=eq.${encodeURIComponent(funcaoId)}&select=permissao_id`,
+    { headers: supabaseHeaders() }
+  );
+  const vinculos = validarListaSupabase(vinculosResponse, await vinculosResponse.json(), "Supabase permissões da função");
+  const ids = vinculos.map(item => String(item.permissao_id || "")).filter(Boolean);
+  if (!ids.length) return [];
+
+  const permissoesResponse = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_permissoes?id=in.(${ids.map(encodeURIComponent).join(",")})&select=chave`,
+    { headers: supabaseHeaders() }
+  );
+  const permissoes = validarListaSupabase(permissoesResponse, await permissoesResponse.json(), "Supabase permissões");
+  return permissoes.map(item => String(item.chave || "")).filter(Boolean);
+}
+
+async function listarFuncoesCatalogo() {
+  const [funcoesResponse, permissoesResponse, vinculosResponse] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/app_funcoes?select=id,codigo,nome,descricao,sistema,ativo,ordem&order=ordem.asc,nome.asc`, { headers: supabaseHeaders() }),
+    fetch(`${SUPABASE_URL}/rest/v1/app_permissoes?select=id,chave,nome,descricao,grupo,ordem&order=ordem.asc,nome.asc`, { headers: supabaseHeaders() }),
+    fetch(`${SUPABASE_URL}/rest/v1/app_funcao_permissoes?select=funcao_id,permissao_id`, { headers: supabaseHeaders() })
+  ]);
+  const funcoes = validarListaSupabase(funcoesResponse, await funcoesResponse.json(), "Supabase funções");
+  const permissoes = validarListaSupabase(permissoesResponse, await permissoesResponse.json(), "Supabase catálogo de permissões");
+  const vinculos = validarListaSupabase(vinculosResponse, await vinculosResponse.json(), "Supabase vínculos de permissões");
+  const porFuncao = new Map();
+  for (const vinculo of vinculos) {
+    const lista = porFuncao.get(String(vinculo.funcao_id)) || [];
+    const permissao = permissoes.find(item => String(item.id) === String(vinculo.permissao_id));
+    if (permissao?.chave) lista.push(permissao.chave);
+    porFuncao.set(String(vinculo.funcao_id), lista);
+  }
+  return {
+    funcoes: funcoes.map(funcao => ({ ...funcao, permissoes: porFuncao.get(String(funcao.id)) || [] })),
+    permissoes
+  };
 }
 
 async function autenticarToken(token) {
@@ -376,6 +417,7 @@ function papeisPermitidos(req) {
   if (rota.startsWith("/metricas")) return ["dev"];
   if (rota.startsWith("/auditoria")) return ["dev", "administrador"];
   if (rota.startsWith("/usuarios")) return ["dev", "administrador"];
+  if (rota.startsWith("/funcoes")) return ["dev", "administrador"];
   if (rota.startsWith("/alertas")) return ["dev", "administrador"];
   if (
     metodo === "DELETE" ||
@@ -390,6 +432,29 @@ function papeisPermitidos(req) {
   }
 
   return ["dev", "administrador", "usuario", "auditor"];
+}
+
+function permissaoDaRota(req) {
+  const rota = req.path;
+  const metodo = req.method;
+  if (rota === "/funcoes" || rota.startsWith("/funcoes/")) return "funcoes.gerenciar";
+  if (rota === "/usuarios" || rota.startsWith("/usuarios/")) return "usuarios.gerenciar";
+  if (rota.startsWith("/alertas")) return "alertas.gerenciar";
+  if (rota.startsWith("/auditoria")) return "auditoria.visualizar";
+  if (rota.startsWith("/metricas")) return "consumo.visualizar";
+  if (rota.startsWith("/assistente")) return "assistente.usar";
+  if (rota.startsWith("/suporte/tickets")) return "suporte.abrir";
+  if (rota.startsWith("/divergentes")) return "divergentes.visualizar";
+  if (rota.startsWith("/relatorios-diarios") || rota.startsWith("/relatorio-dia")) return "relatorios.visualizar";
+  if (rota.startsWith("/historico-exclusoes")) return "historico.visualizar";
+  if (rota === "/sync" || rota === "/reprocess") return "processamento.executar";
+  if (rota === "/status" || rota === "/pendentes" || rota.startsWith("/criterios")) {
+    return metodo === "PATCH" ? "configuracoes.gerenciar" : "processamento.visualizar";
+  }
+  if (rota.startsWith("/certificados")) return metodo === "DELETE" ? "certificados.excluir" : "certificados.visualizar";
+  if (rota.startsWith("/download") || rota.startsWith("/downloads")) return "certificados.baixar";
+  if (rota.startsWith("/loggers")) return "movimentacoes.visualizar";
+  return null;
 }
 
 function identificarAcaoAuditoria(metodo, rota) {
@@ -468,7 +533,12 @@ app.use(async (req, res, next) => {
     if (!token) return res.status(401).json({ erro: "Autenticação obrigatória" });
 
     req.auth = await autenticarToken(token);
-    if (!papeisPermitidos(req).includes(req.auth.perfil.role)) {
+    const permissao = permissaoDaRota(req);
+    const possuiFuncao = Boolean(req.auth.perfil.funcao_id);
+    const possuiPermissao = !permissao || req.auth.perfil.role === "dev" || req.auth.perfil.role === "administrador"
+      || req.auth.perfil.permissoes?.includes(permissao);
+    const roleLegadoPermitido = papeisPermitidos(req).includes(req.auth.perfil.role);
+    if ((possuiFuncao && !possuiPermissao) || (!possuiFuncao && !roleLegadoPermitido)) {
       return res.status(403).json({ erro: "Você não possui permissão para esta ação" });
     }
     next();
@@ -4221,14 +4291,92 @@ app.post("/alertas/relatorio", async (req, res) => {
   }
 });
 
+app.get("/funcoes", async (_req, res) => {
+  try {
+    const catalogo = await listarFuncoesCatalogo();
+    res.setHeader("Cache-Control", "no-store");
+    res.json(catalogo);
+  } catch (e) {
+    res.status(500).json({ erro: "Não foi possível carregar as funções e permissões" });
+  }
+});
+
+app.post("/funcoes", async (req, res) => {
+  try {
+    if (!supabaseAdmin) return res.status(503).json({ erro: "Serviço de funções indisponível" });
+    const nome = String(req.body?.nome || "").trim().slice(0, 100);
+    const descricao = String(req.body?.descricao || "").trim().slice(0, 240) || null;
+    if (!nome) return res.status(400).json({ erro: "Informe o nome da função" });
+    const baseCodigo = nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) || "funcao";
+    const codigo = `${baseCodigo}_${crypto.randomBytes(3).toString("hex")}`;
+    const { data, error } = await supabaseAdmin.from("app_funcoes").insert({ codigo, nome, descricao }).select("*").single();
+    if (error) throw error;
+    res.status(201).json({ funcao: { ...data, permissoes: [] } });
+  } catch (e) {
+    res.status(500).json({ erro: "Não foi possível criar a função" });
+  }
+});
+
+app.patch("/funcoes/:id", async (req, res) => {
+  try {
+    if (!supabaseAdmin) return res.status(503).json({ erro: "Serviço de funções indisponível" });
+    const id = String(req.params.id || "");
+    const catalogo = await listarFuncoesCatalogo();
+    const atual = catalogo.funcoes.find(funcao => String(funcao.id) === id);
+    if (!atual) return res.status(404).json({ erro: "Função não encontrada" });
+
+    const atualizacao = {};
+    if (req.body?.nome !== undefined) {
+      const nome = String(req.body.nome).trim().slice(0, 100);
+      if (!nome) return res.status(400).json({ erro: "Informe o nome da função" });
+      atualizacao.nome = nome;
+    }
+    if (req.body?.descricao !== undefined) atualizacao.descricao = String(req.body.descricao || "").trim().slice(0, 240) || null;
+    if (req.body?.ativo !== undefined) atualizacao.ativo = Boolean(req.body.ativo);
+    if (Object.keys(atualizacao).length) {
+      const { error } = await supabaseAdmin.from("app_funcoes").update(atualizacao).eq("id", id);
+      if (error) throw error;
+    }
+
+    if (Array.isArray(req.body?.permissoes)) {
+      const permitidas = new Set(catalogo.permissoes.map(permissao => permissao.chave));
+      const chaves = [...new Set(req.body.permissoes.map(item => String(item || "").trim()))]
+        .filter(chave => permitidas.has(chave));
+      const permissoes = catalogo.permissoes.filter(permissao => chaves.includes(permissao.chave));
+      const { error: removerError } = await supabaseAdmin.from("app_funcao_permissoes").delete().eq("funcao_id", id);
+      if (removerError) throw removerError;
+      if (permissoes.length) {
+        const { error: inserirError } = await supabaseAdmin.from("app_funcao_permissoes").insert(
+          permissoes.map(permissao => ({ funcao_id: id, permissao_id: permissao.id }))
+        );
+        if (inserirError) throw inserirError;
+      }
+    }
+
+    authCache.clear();
+    profileCache.clear();
+    const atualizado = (await listarFuncoesCatalogo()).funcoes.find(funcao => String(funcao.id) === id);
+    res.json({ funcao: atualizado });
+  } catch (e) {
+    console.error("Falha ao atualizar função:", e.message);
+    res.status(500).json({ erro: "Não foi possível atualizar a função" });
+  }
+});
+
 app.get("/usuarios", async (req, res) => {
   try {
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,aprovado`,
+      `${SUPABASE_URL}/rest/v1/profiles?select=id,email,nome,role,ativo,aprovado,funcao_id`,
       { headers: supabaseHeaders() }
     );
     const data = await response.json();
     const perfis = validarListaSupabase(response, data, "Supabase usuários");
+    const catalogo = await listarFuncoesCatalogo();
+    const nomePorFuncao = new Map(catalogo.funcoes.map(funcao => [String(funcao.id), funcao.nome]));
+    for (const perfil of perfis) {
+      perfil.funcao_nome = perfil.funcao_id ? nomePorFuncao.get(String(perfil.funcao_id)) || null : null;
+    }
     const porId = new Map(perfis.map((perfil) => [String(perfil.id), perfil]));
 
     // O convite já cria o perfil. A união com Auth também torna visível uma
@@ -4253,6 +4401,8 @@ app.get("/usuarios", async (req, res) => {
             role: "usuario",
             ativo: false,
             aprovado: false,
+            funcao_id: null,
+            funcao_nome: null,
             created_at: usuario.created_at || undefined,
             last_sign_in_at: usuario.last_sign_in_at || null
           });
@@ -4281,6 +4431,7 @@ app.post("/usuarios/convidar", async (req, res) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const nome = String(req.body?.nome || "").trim().slice(0, 120);
     const role = String(req.body?.role || "usuario").trim().toLowerCase();
+    const funcaoId = req.body?.funcao_id ? String(req.body.funcao_id) : null;
     const rolesValidas = ["administrador", "usuario"];
     const emailValido = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
 
@@ -4289,6 +4440,11 @@ app.post("/usuarios/convidar", async (req, res) => {
     }
     if (!rolesValidas.includes(role)) {
       return res.status(400).json({ erro: "Perfil de acesso inválido" });
+    }
+    if (funcaoId) {
+      const catalogo = await listarFuncoesCatalogo();
+      const funcao = catalogo.funcoes.find(item => String(item.id) === funcaoId && item.ativo);
+      if (!funcao) return res.status(400).json({ erro: "Função operacional inválida ou inativa" });
     }
 
     const usuarioExistente = await buscarUsuarioAuthPorEmail(email);
@@ -4317,6 +4473,7 @@ app.post("/usuarios/convidar", async (req, res) => {
       data: {
         nome: nome || email.split("@")[0],
         role,
+        funcao_id: funcaoId,
         convite_pendente: true,
         senha_definida: false,
         cadastro_concluido: false,
@@ -4344,6 +4501,7 @@ app.post("/usuarios/convidar", async (req, res) => {
           email,
           nome: nome || email.split("@")[0],
           role,
+          funcao_id: funcaoId,
           ativo: true,
           aprovado: true
         },
@@ -4366,6 +4524,8 @@ app.post("/usuarios/convidar", async (req, res) => {
         email,
         nome: nome || email.split("@")[0],
         role,
+        funcao_id: funcaoId,
+        funcao_nome: funcaoId ? (await listarFuncoesCatalogo()).funcoes.find(item => String(item.id) === funcaoId)?.nome || null : null,
         ativo: true,
         aprovado: true
       }
@@ -4380,7 +4540,7 @@ app.patch("/usuarios/:id", async (req, res) => {
   try {
     const id = String(req.params.id);
     const busca = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo,aprovado`,
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(id)}&select=id,email,nome,role,ativo,aprovado,funcao_id`,
       { headers: supabaseHeaders() }
     );
     const atualData = validarListaSupabase(busca, await busca.json(), "Supabase usuário");
@@ -4392,12 +4552,20 @@ app.patch("/usuarios/:id", async (req, res) => {
     const ativo = req.body?.ativo === undefined ? atual.ativo : Boolean(req.body.ativo);
     const aprovado = req.body?.aprovado === undefined ? atual.aprovado : Boolean(req.body.aprovado);
     const nome = req.body?.nome === undefined ? atual.nome : String(req.body.nome).trim();
+    const funcaoId = req.body?.funcao_id === undefined ? (atual.funcao_id || null) : (req.body.funcao_id ? String(req.body.funcao_id) : null);
 
     if (!["dev", "administrador", "usuario", "auditor"].includes(role)) {
       return res.status(400).json({ erro: "Perfil de acesso inválido" });
     }
     if (!solicitanteDev && (atual.role === "dev" || role === "dev")) {
       return res.status(403).json({ erro: "Somente DEV pode alterar um perfil DEV" });
+    }
+    let funcaoNome = null;
+    if (funcaoId) {
+      const catalogo = await listarFuncoesCatalogo();
+      const funcao = catalogo.funcoes.find(item => String(item.id) === funcaoId && item.ativo);
+      if (!funcao) return res.status(400).json({ erro: "Função operacional inválida ou inativa" });
+      funcaoNome = funcao.nome;
     }
     if (id === req.auth.user.id && (!ativo || !aprovado)) {
       return res.status(400).json({ erro: "Você não pode desativar ou reprovar o próprio usuário" });
@@ -4408,7 +4576,7 @@ app.patch("/usuarios/:id", async (req, res) => {
       {
         method: "PATCH",
         headers: { ...supabaseHeaders(), Prefer: "return=representation" },
-        body: JSON.stringify({ nome, role, ativo, aprovado })
+        body: JSON.stringify({ nome, role, funcao_id: funcaoId, ativo, aprovado })
       }
     );
     const registros = validarListaSupabase(
@@ -4419,7 +4587,7 @@ app.patch("/usuarios/:id", async (req, res) => {
 
     profileCache.delete(id);
     authCache.clear();
-    res.json({ sucesso: true, usuario: registros[0] });
+    res.json({ sucesso: true, usuario: { ...registros[0], funcao_nome: funcaoNome } });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
