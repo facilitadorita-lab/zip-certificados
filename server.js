@@ -105,7 +105,7 @@ const ALERTAS_AUTO_INTERVAL_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.ALERTAS_AUTO_INTERVAL_MS || 15 * 60 * 1000)
 );
-const ALERTAS_MAX_ITENS_EMAIL = Math.max(50, Math.min(1000, Number(process.env.ALERTAS_MAX_ITENS_EMAIL || 500)));
+const ALERTAS_PAGE_SIZE = Math.max(100, Math.min(1000, Number(process.env.ALERTAS_PAGE_SIZE || 500)));
 const limparConfiguracao = (valor) => String(valor || "")
   .trim()
   .replace(/^['"]|['"]$/g, "");
@@ -1334,6 +1334,16 @@ function dataLocalHojeISO() {
   }).format(new Date());
 }
 
+function dataLocalDeslocadaISO(dias) {
+  const [ano, mes, dia] = dataLocalHojeISO().split("-").map(Number);
+  const data = new Date(Date.UTC(ano, mes - 1, dia + dias));
+  return data.toISOString().slice(0, 10);
+}
+
+function dataLocalOntemISO() {
+  return dataLocalDeslocadaISO(-1);
+}
+
 function normalizarModuloAlerta(valor) {
   const modulo = String(valor || "AMBOS").trim().toUpperCase();
   return MODULOS_ALERTAS.includes(modulo) || modulo === "AMBOS" ? modulo : "AMBOS";
@@ -1400,24 +1410,35 @@ async function salvarDestinatariosAlertas(req, registros) {
 async function consultarCertificadosAlerta(modulo, dataInicio, dataFim) {
   const tabela = modulo === "DLH" ? "certificados_dlh" : "certificados";
   const colunaLogger = modulo === "DLH" ? "dlh" : "dlt";
-  const params = new URLSearchParams({
-    select: `${colunaLogger},serie,status,vencimento,validade,criado_em,nome_original,certificado`,
-    order: "criado_em.desc",
-    limit: String(ALERTAS_MAX_ITENS_EMAIL)
-  });
-  if (dataInicio) params.set("criado_em", `gte.${dataInicio}T00:00:00-03:00`);
-  if (dataFim) params.append("criado_em", `lte.${dataFim}T23:59:59.999-03:00`);
+  const registros = [];
+  let offset = 0;
 
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?${params}`, {
-    headers: supabaseHeaders()
-  });
-  const data = await response.json();
-  const registros = validarListaSupabase(response, data, `Supabase certificados ${modulo}`);
-  return registros.map((item) => ({
-    ...item,
-    modulo,
-    logger: item[colunaLogger]
-  }));
+  while (true) {
+    const params = new URLSearchParams({
+      select: `${colunaLogger},serie,status,vencimento,validade,criado_em,nome_original,certificado`,
+      order: "criado_em.desc",
+      limit: String(ALERTAS_PAGE_SIZE),
+      offset: String(offset)
+    });
+    if (dataInicio) params.set("criado_em", `gte.${dataInicio}T00:00:00-03:00`);
+    if (dataFim) params.append("criado_em", `lte.${dataFim}T23:59:59.999-03:00`);
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${tabela}?${params}`, {
+      headers: supabaseHeaders()
+    });
+    const data = await response.json();
+    const pagina = validarListaSupabase(response, data, `Supabase certificados ${modulo}`);
+    registros.push(...pagina.map((item) => ({
+      ...item,
+      modulo,
+      logger: item[colunaLogger]
+    })));
+
+    if (pagina.length < ALERTAS_PAGE_SIZE) break;
+    offset += pagina.length;
+  }
+
+  return registros;
 }
 
 function classificarAlertasCertificados(registros) {
@@ -1444,30 +1465,70 @@ function linhasTabelaAlerta(lista, limite = 80) {
     </tr>`).join("");
 }
 
-function montarHtmlRelatorioAlertas(resultado, eventos, dataInicio, dataFim) {
-  const secao = (titulo, lista) => `
-    <h3 style="margin:22px 0 8px;font-size:15px">${escaparHtmlAlerta(titulo)} (${lista.length})</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead><tr style="background:#f1f5f9;text-align:left">
-        <th style="padding:7px">Logger</th><th style="padding:7px">Série</th><th style="padding:7px">Status</th><th style="padding:7px">Vencimento</th><th style="padding:7px">Processado em</th>
-      </tr></thead>
-      <tbody>${linhasTabelaAlerta(lista)}</tbody>
-    </table>
-    ${lista.length > 80 ? `<p style="color:#64748b;font-size:12px">Mostrando 80 de ${lista.length} registros nesta seção.</p>` : ""}`;
+function resumirAlertasPorModulo(registros) {
+  return MODULOS_ALERTAS.map((modulo) => {
+    const itens = registros.filter((item) => item.modulo === modulo);
+    const status = (valor) => String(valor || "").toUpperCase();
+    return {
+      modulo,
+      processados: itens.length,
+      aprovados: itens.filter((item) => status(item.status) === "APROVADO").length,
+      reprovados: itens.filter((item) => status(item.status) === "REPROVADO").length,
+      vencidos: classificarAlertasCertificados(itens).vencidos.length,
+      erros: itens.filter((item) => status(item.status) === "ERRO").length
+    };
+  });
+}
 
-  const blocos = [];
-  if (eventos.includes("processados")) blocos.push(secao("Certificados processados", resultado.processados));
-  if (eventos.includes("reprovados_vencidos")) {
-    blocos.push(secao("Reprovados", resultado.reprovados));
-    blocos.push(secao("Vencidos", resultado.vencidos));
-    if (resultado.erros.length) blocos.push(secao("Erros de processamento", resultado.erros));
-  }
+function escaparCsvAlerta(valor) {
+  return `"${String(valor ?? "").replace(/"/g, '""')}"`;
+}
+
+function montarCsvRelatorioAlertas(registros) {
+  const cabecalho = ["Modulo", "Logger", "Serie", "Status", "Vencimento", "Validade", "Processado em", "Arquivo original", "Certificado"];
+  const linhas = registros.map((item) => [
+    item.modulo,
+    item.logger,
+    item.serie,
+    item.status,
+    item.vencimento,
+    item.validade,
+    item.criado_em,
+    item.nome_original,
+    item.certificado
+  ]);
+  return `\uFEFF${[cabecalho, ...linhas].map((linha) => linha.map(escaparCsvAlerta).join(";")).join("\r\n")}`;
+}
+
+function montarHtmlRelatorioAlertas(resultado, dataInicio, dataFim, nomeAnexo) {
+  const resumos = resumirAlertasPorModulo(resultado.processados);
+  const card = (titulo, valor, cor) => `<td style="width:25%;padding:6px"><div style="border:1px solid #dbe3ec;border-top:4px solid ${cor};padding:12px;background:#fff"><div style="font-size:11px;color:#64748b">${titulo}</div><div style="font-size:24px;font-weight:700;color:#102a43">${valor}</div></div></td>`;
+  const linhasResumo = resumos.map((item) => `
+    <tr>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700">${item.modulo}</td>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${item.processados}</td>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${item.aprovados}</td>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${item.reprovados}</td>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${item.vencidos}</td>
+      <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${item.erros}</td>
+    </tr>`).join("");
+
   return `<!doctype html><html lang="pt-BR"><body style="margin:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#102a43">
     <div style="max-width:900px;margin:24px auto;background:#fff;border:1px solid #dbe3ec">
       <div style="background:#12355b;padding:22px"><h1 style="margin:0;color:#fff;font-size:22px">Calibra<span style="color:#2dd4bf">Flow</span></h1><p style="margin:8px 0 0;color:#dbeafe">Alertas operacionais e relatório de certificados</p></div>
-      <div style="padding:22px"><p style="margin:0 0 8px"><b>Período:</b> ${escaparHtmlAlerta(dataInicio)} a ${escaparHtmlAlerta(dataFim)}</p>
-        <p style="margin:0;color:#64748b">${resultado.processados.length} processado(s), ${resultado.reprovados.length} reprovado(s), ${resultado.vencidos.length} vencido(s) e ${resultado.erros.length} erro(s).</p>
-        ${blocos.join("")}
+      <div style="padding:22px"><p style="margin:0 0 8px"><b>Período processado:</b> ${escaparHtmlAlerta(dataInicio)} a ${escaparHtmlAlerta(dataFim)}</p>
+        <table style="width:100%;border-collapse:collapse;margin:12px 0"><tr>
+          ${card("Processados", resultado.processados.length, "#2563eb")}
+          ${card("Reprovados", resultado.reprovados.length, "#ef4444")}
+          ${card("Vencidos", resultado.vencidos.length, "#f59e0b")}
+          ${card("Erros", resultado.erros.length, "#64748b")}
+        </tr></table>
+        <h3 style="margin:24px 0 8px;font-size:15px">Resumo por módulo</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="background:#f1f5f9;text-align:left"><th style="padding:8px">Módulo</th><th style="padding:8px;text-align:right">Processados</th><th style="padding:8px;text-align:right">Aprovados</th><th style="padding:8px;text-align:right">Reprovados</th><th style="padding:8px;text-align:right">Vencidos</th><th style="padding:8px;text-align:right">Erros</th></tr></thead>
+          <tbody>${linhasResumo}</tbody>
+        </table>
+        <p style="margin:20px 0 0;padding:12px;background:#eef6ff;color:#1e3a5f;font-size:13px">O detalhamento completo de todos os certificados está anexado em <b>${escaparHtmlAlerta(nomeAnexo)}</b>.</p>
       </div>
       <div style="padding:14px;text-align:center;background:#f1f5f9;color:#64748b;font-size:12px">CalibraFlow - Gestão de Certificados</div>
     </div></body></html>`;
@@ -1516,25 +1577,48 @@ async function enviarRelatorioAlertas({ modulo = "AMBOS", dataInicio, dataFim, e
   }
 
   const deveEnviar = resultado.processados.length > 0 || resultado.reprovados.length > 0 || resultado.vencidos.length > 0 || resultado.erros.length > 0;
-  if (!deveEnviar || !emails.length) {
-    await registrarEnvioAlerta({
-      chave: idempotencia,
-      modulo: moduloNormalizado,
-      eventos: eventosNormalizados,
-      periodo_inicio: inicio,
-      periodo_fim: fim,
-      total_processados: resultado.processados.length,
-      total_reprovados: resultado.reprovados.length,
-      total_vencidos: resultado.vencidos.length,
-      total_erros: resultado.erros.length,
-      destinatarios: emails.length,
-      status: "ignorado",
-      detalhe: emails.length ? "Nenhum registro no período" : "Nenhum destinatário ativo configurado"
-    });
-    return { ok: true, ignorado: true, motivo: emails.length ? "Nenhum registro no período" : "Nenhum destinatário ativo configurado", destinatarios: emails.length, resultado };
+  if (!deveEnviar) {
+    if (!automatico) {
+      await registrarEnvioAlerta({
+        chave: idempotencia,
+        modulo: moduloNormalizado,
+        eventos: eventosNormalizados,
+        periodo_inicio: inicio,
+        periodo_fim: fim,
+        total_processados: 0,
+        total_reprovados: 0,
+        total_vencidos: 0,
+        total_erros: 0,
+        destinatarios: emails.length,
+        status: "ignorado",
+        detalhe: "Nenhum registro no período"
+      });
+    }
+    return { ok: true, ignorado: true, motivo: "Nenhum registro no período", destinatarios: emails.length, resultado };
+  }
+  if (!emails.length) {
+    if (!automatico) {
+      await registrarEnvioAlerta({
+        chave: idempotencia,
+        modulo: moduloNormalizado,
+        eventos: eventosNormalizados,
+        periodo_inicio: inicio,
+        periodo_fim: fim,
+        total_processados: resultado.processados.length,
+        total_reprovados: resultado.reprovados.length,
+        total_vencidos: resultado.vencidos.length,
+        total_erros: resultado.erros.length,
+        destinatarios: emails.length,
+        status: "ignorado",
+        detalhe: "Nenhum destinatário ativo configurado"
+      });
+    }
+    return { ok: true, ignorado: true, motivo: "Nenhum destinatário ativo configurado", destinatarios: emails.length, resultado };
   }
   if (!ALERTAS_RESEND_API_KEY) throw new Error("RESEND_API_KEY não configurada no backend");
 
+  const nomeAnexo = `calibraflow-certificados-${inicio}-${fim}.csv`;
+  const csvBase64 = Buffer.from(montarCsvRelatorioAlertas(registros), "utf8").toString("base64");
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${ALERTAS_RESEND_API_KEY}`, "Content-Type": "application/json", "Idempotency-Key": idempotencia },
@@ -1542,7 +1626,12 @@ async function enviarRelatorioAlertas({ modulo = "AMBOS", dataInicio, dataFim, e
       from: ALERTAS_FROM_EMAIL,
       to: emails,
       subject: `[CalibraFlow] ${moduloNormalizado} - ${resultado.reprovados.length} reprovado(s), ${resultado.vencidos.length} vencido(s), ${resultado.processados.length} processado(s)`,
-      html: montarHtmlRelatorioAlertas(resultado, eventosNormalizados, inicio, fim)
+      html: montarHtmlRelatorioAlertas(resultado, inicio, fim, nomeAnexo),
+      attachments: [{
+        filename: nomeAnexo,
+        content: csvBase64,
+        content_type: "text/csv"
+      }]
     })
   });
   if (!response.ok) throw new Error(`Falha ao enviar alerta por e-mail (${response.status}): ${await response.text()}`);
@@ -1561,18 +1650,18 @@ async function enviarRelatorioAlertas({ modulo = "AMBOS", dataInicio, dataFim, e
     status: "enviado",
     detalhe: envio?.id || null
   });
-  return { ok: true, email_enviado: true, destinatarios: emails, resultado, id: envio?.id || null };
+  return { ok: true, email_enviado: true, anexo: nomeAnexo, destinatarios: emails, resultado, id: envio?.id || null };
 }
 
 async function verificarAlertasAutomaticamente() {
   if (!ALERTAS_AUTO_ENABLED || !ALERTAS_RESEND_API_KEY) return;
-  const hoje = dataLocalHojeISO();
+  const ontem = dataLocalOntemISO();
   try {
     await enviarRelatorioAlertas({
       modulo: "AMBOS",
-      dataInicio: hoje,
-      dataFim: hoje,
-      chave: `automatico-${hoje}`,
+      dataInicio: ontem,
+      dataFim: ontem,
+      chave: `automatico-${ontem}`,
       automatico: true
     });
   } catch (e) {
@@ -4055,13 +4144,13 @@ app.post("/automacao/sincronizar", async (req, res) => {
 app.post("/automacao/alertas-email", async (req, res) => {
   if (!validarSegredoAutomacao(req, res)) return;
   try {
-    const hoje = dataLocalHojeISO();
+    const ontem = dataLocalOntemISO();
     const resultado = await enviarRelatorioAlertas({
       modulo: normalizarModuloAlerta(req.body?.modulo || "AMBOS"),
-      dataInicio: String(req.body?.data_inicio || hoje),
-      dataFim: String(req.body?.data_fim || hoje),
+      dataInicio: String(req.body?.data_inicio || ontem),
+      dataFim: String(req.body?.data_fim || ontem),
       eventos: req.body?.eventos,
-      chave: String(req.body?.chave || `automatico-${hoje}`),
+      chave: String(req.body?.chave || `automatico-${ontem}`),
       automatico: true
     });
     res.json(resultado);
