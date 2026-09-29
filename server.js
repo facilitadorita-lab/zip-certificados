@@ -2934,6 +2934,66 @@ function aplicarValidadeAtual(registros) {
   });
 }
 
+function timestampRecenciaCertificado(valor) {
+  const texto = String(valor || "").trim();
+  if (!texto) return Number.NEGATIVE_INFINITY;
+  const timestamp = Date.parse(texto);
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
+
+function compararRecenciaCertificado(a, b) {
+  const dataA = timestampRecenciaCertificado(a?.data);
+  const dataB = timestampRecenciaCertificado(b?.data);
+  if (dataA !== dataB) return dataA - dataB;
+
+  const criadoA = timestampRecenciaCertificado(a?.criado_em);
+  const criadoB = timestampRecenciaCertificado(b?.criado_em);
+  if (criadoA !== criadoB) return criadoA - criadoB;
+
+  return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+function selecionarCertificadosAtuaisDlt(registros) {
+  const porLogger = new Map();
+  for (const registro of registros) {
+    const chave = normalizarDLT(registro?.dlt);
+    if (!chave) continue;
+    const anterior = porLogger.get(chave);
+    if (!anterior || compararRecenciaCertificado(registro, anterior) > 0) {
+      porLogger.set(chave, registro);
+    }
+  }
+  return [...porLogger.values()];
+}
+
+async function buscarCertificadosAtuaisDlt(filtros = []) {
+  validarConfiguracaoBasica();
+  const registros = [];
+  let offset = 0;
+  const limite = 1000;
+
+  while (true) {
+    const params = new URLSearchParams();
+    params.set("select", CERTIFICADOS_LISTA_SELECT);
+    for (const [chave, valor] of filtros) params.append(chave, valor);
+    params.append("order", "data.desc");
+    params.append("order", "id.asc");
+    params.set("limit", String(limite));
+    params.set("offset", String(offset));
+
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/certificados?${params.toString()}`,
+      { headers: supabaseHeaders() }
+    );
+    const pagina = validarListaSupabase(response, await response.json(), "Supabase certificados atuais");
+    registros.push(...pagina);
+    if (pagina.length < limite) break;
+    offset += pagina.length;
+  }
+
+  return aplicarValidadeAtual(selecionarCertificadosAtuaisDlt(registros));
+}
+
 function somenteNumeroBR(texto) {
   return /^-?\d+,\d+$/.test((texto || "").trim());
 }
@@ -4832,6 +4892,17 @@ app.get("/certificados", async (req, res) => {
       filtros.push(["data", `lte.${testeFim}`], ["vencimento", `gte.${testeInicio}`]);
     } else if (testeInicio || testeFim) {
       return res.status(400).json({ erro: "Informe data inicial e data final do teste, ou deixe as duas em branco" });
+    }
+
+    if (String(req.query.somente_atuais || "") === "1") {
+      const registrosAtuais = await buscarCertificadosAtuaisDlt(filtros);
+      return res.json({
+        total: registrosAtuais.length,
+        limit: registrosAtuais.length,
+        offset: 0,
+        somente_atuais: true,
+        registros: registrosAtuais
+      });
     }
 
     const params = new URLSearchParams();
