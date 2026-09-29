@@ -256,6 +256,7 @@ const STATUS_CACHE_MS = Number(process.env.STATUS_CACHE_MS || 30000);
 const IDS_CACHE_MS = Number(process.env.IDS_CACHE_MS || 600000);
 const AUTO_SYNC_ENABLED = String(process.env.AUTO_SYNC_ENABLED || "true") === "true";
 const AUTO_SYNC_START_DELAY_MS = Number(process.env.AUTO_SYNC_START_DELAY_MS || 15000);
+const AUTO_SYNC_INTERVAL_MS = Number(process.env.AUTO_SYNC_INTERVAL_MS || 300000);
 const CRITERIOS_CACHE_MS = Number(process.env.CRITERIOS_CACHE_MS || 600000);
 const METRICS_ENABLED = String(process.env.METRICS_ENABLED || "true") === "true";
 const METRICS_TIMEZONE = process.env.METRICS_TIMEZONE || "America/Sao_Paulo";
@@ -6827,8 +6828,15 @@ app.listen(PORT, () => {
   console.log(`Servidor DLH rodando na porta ${PORT} 🚀`);
 
   if (AUTO_SYNC_ENABLED) {
+    const verificarNovosArquivos = () => {
+      executarSyncAutomaticoDLH().catch(e => {
+        console.log("Erro na verificação automática de novos certificados DLH:", e.message);
+      });
+    };
+
     setTimeout(() => {
-      executarSyncAutomaticoDLH();
+      verificarNovosArquivos();
+      setInterval(verificarNovosArquivos, AUTO_SYNC_INTERVAL_MS);
     }, AUTO_SYNC_START_DELAY_MS);
   }
 

@@ -10,6 +10,11 @@ Build Command: npm install
 Start Command: node server-dlh.js
 Health Check Path: /
 
+AUTOMACAO DE NOVOS CERTIFICADOS
+- Com AUTO_SYNC_ENABLED=true (padrao), DLT e DLH verificam novos PDFs automaticamente.
+- A verificacao ocorre a cada AUTO_SYNC_INTERVAL_MS; o padrao e 300000 ms (5 minutos).
+- Se um lote estiver em andamento, a nova verificacao e ignorada para evitar duplicidade.
+
 O arquivo package.json principal atende aos dois servicos.
 O dhl-package.json fica apenas como referencia e nao e selecionado automaticamente pelo Render.
 
