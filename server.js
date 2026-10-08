@@ -122,6 +122,7 @@ const CERTIFICADOS_LISTA_SELECT = [
   "data",
   "certificado",
   "status",
+  "erro_acima_1c",
   "validade",
   "vencimento",
   "mes_ano_validade",
@@ -5967,7 +5968,7 @@ app.delete("/certificados/:id", async (req, res) => {
         method: "POST",
         headers: supabaseHeaders(),
         body: JSON.stringify({
-          ...certificado,
+          ...Object.fromEntries(Object.entries(certificado).filter(([campo]) => campo !== "erro_acima_1c")),
           motivo_exclusao: `Exclusão manual pelo Lovable - ${certificado.motivo_divergencia || "Divergente"}`,
           excluido_em: new Date().toISOString()
         })
