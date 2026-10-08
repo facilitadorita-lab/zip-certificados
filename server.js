@@ -1,4 +1,5 @@
 import express from "express";
+import { criarQualidade } from "./qualidade.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -439,6 +440,8 @@ function papeisPermitidos(req) {
 function permissaoDaRota(req) {
   const rota = req.path;
   const metodo = req.method;
+  if (rota.startsWith('/qualidade')) return metodo === 'POST' ? 'qualidade.avaliar' : 'qualidade.visualizar';
+  if (rota.startsWith('/processamento/falhas')) return metodo === 'POST' ? 'processamento.executar' : 'processamento.visualizar';
   if (rota === "/funcoes" || rota.startsWith("/funcoes/")) return "funcoes.gerenciar";
   if (rota === "/usuarios" || rota.startsWith("/usuarios/")) return "usuarios.gerenciar";
   if (rota.startsWith("/alertas")) return "alertas.gerenciar";
@@ -2984,7 +2987,7 @@ async function buscarCertificadosAtuaisDlt(filtros = []) {
     params.set("offset", String(offset));
 
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados?${params.toString()}`,
+      `${SUPABASE_URL}/rest/v1/certificados_atuais_dlt?${params.toString()}`,
       { headers: supabaseHeaders() }
     );
     const pagina = validarListaSupabase(response, await response.json(), "Supabase certificados atuais");
@@ -3905,8 +3908,11 @@ async function buscarArquivosDrive() {
 // =========================
 // EXECUÇÃO DE SYNC EM BACKGROUND
 // =========================
-async function executarSyncEmBackground() {
-  if (syncLocalEmExecucao) return;
+async function executarSyncEmBackground(arquivoId = null) {
+  if (syncLocalEmExecucao) {
+    if (arquivoId) throw new Error('Sincronizacao em andamento. Tente novamente ao concluir.');
+    return;
+  }
   syncLocalEmExecucao = true;
   let deveContinuar = false;
 
@@ -3915,6 +3921,7 @@ async function executarSyncEmBackground() {
     const idsExcluidos = await buscarIdsExcluidos();
     const arquivosDrive = await buscarArquivosDrive();
     const criterios = await buscarCriteriosCalibracao();
+    await qualidade.resolverFalha('_sincronizacao');
 
     await atualizarControleSync({
       em_execucao: true,
@@ -3925,6 +3932,7 @@ async function executarSyncEmBackground() {
     let processados = 0;
 
     for (const f of arquivosDrive) {
+      if (arquivoId && f.id !== arquivoId) continue;
       if (idsBanco.has(f.id)) continue;
       if (idsExcluidos.has(f.id)) continue;
       if (processados >= LIMITE) break;
@@ -3936,6 +3944,7 @@ async function executarSyncEmBackground() {
 
         if (!meta.dlt || !meta.serie || !meta.data) {
           console.log("Arquivo sem metadados suficientes:", f.name, meta);
+          await qualidade.registrarFalha(f, 'Leitura: TAG, serie ou data nao identificada no arquivo.');
           continue;
         }
 
@@ -3943,6 +3952,7 @@ async function executarSyncEmBackground() {
 
         if (!tabela.ok) {
           console.log("Arquivo sem tabela válida:", f.name, tabela.debug);
+          await qualidade.registrarFalha(f, `Leitura: tabela de calibracao incompleta. ${JSON.stringify(tabela.debug || '').slice(0,300)}`);
           continue;
         }
 
@@ -3979,10 +3989,12 @@ async function executarSyncEmBackground() {
         if (!respInsert.ok) {
           const erroInsert = await respInsert.text();
           console.log("Erro ao salvar no banco:", f.name, erroInsert);
+          await qualidade.registrarFalha(f, 'Banco: falha ao gravar certificado.');
           continue;
         }
 
         idsBanco.add(f.id);
+        await qualidade.resolverFalha(f.id);
         processados++;
         invalidarCaches();
 
@@ -3993,6 +4005,7 @@ async function executarSyncEmBackground() {
         });
       } catch (e) {
         console.log("Erro ao processar arquivo:", f.name, e.message);
+        await qualidade.registrarFalha(f, e);
       }
     }
 
@@ -4009,9 +4022,10 @@ async function executarSyncEmBackground() {
       total_processados: idsBancoAtualizado.size
     });
 
-    deveContinuar = faltantesRestantes > 0 && processados > 0;
+    deveContinuar = !arquivoId && faltantesRestantes > 0 && processados > 0;
   } catch (e) {
     console.log("Erro geral executarSyncEmBackground:", e.message);
+    await qualidade.registrarFalha({id:'_sincronizacao',name:'Verificacao da pasta DLT'}, e);
 
     try {
       await atualizarControleSync({
@@ -4033,6 +4047,25 @@ async function executarSyncEmBackground() {
 // =========================
 // ROTAS
 // =========================
+const qualidade = criarQualidade({ app, modulo: 'DLT', url: SUPABASE_URL,
+  headers: supabaseHeaders, fetch, tentarNovamente: async (id) => {
+    if (syncLocalEmExecucao) throw new Error('Sincronizacao em andamento. Tente novamente ao concluir.');
+    if (id === '_sincronizacao') return executarSyncEmBackground();
+    const resposta=await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${encodeURIComponent(id)}&select=id,nome_original,certificado`,{headers:supabaseHeaders()});
+    const [registro]=validarListaSupabase(resposta,await resposta.json(),'Certificado para nova tentativa');
+    if (!registro) return executarSyncEmBackground(id);
+    syncLocalEmExecucao=true;
+    try {
+      const proc=await processarPDF(id);
+      if (proc.status==='ERRO') {await qualidade.registrarFalha({id,name:registro.nome_original},JSON.stringify(proc.debug || 'Falha de leitura'));return;}
+      const gravacao=await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:supabaseHeaders(),body:JSON.stringify({status:proc.status,pontos:proc.pontos,certificado:proc.certificado || registro.certificado})});
+      if (!gravacao.ok) throw new Error('Banco: falha ao salvar nova tentativa.');
+      await qualidade.resolverFalha(id);invalidarCaches();
+    } catch(e) {await qualidade.registrarFalha({id,name:registro.nome_original},e);throw e;}
+    finally {syncLocalEmExecucao=false;}
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("API OK 🚀");
 });
@@ -5468,7 +5501,7 @@ app.post("/loggers/checklist-pre-teste", async (req, res) => {
     const [status, certificadosBrutos] = await Promise.all([
       buscarStatusAtualDLT(unicos),
       buscarCertificadosPorPeriodoEmLotes({
-        tabela: "certificados",
+        tabela: "certificados_atuais_dlt",
         campoEquipamento: "dlt",
         equipamentos: unicos,
         testeInicio,
@@ -5641,11 +5674,15 @@ app.get("/reprocess", async (req, res) => {
 
     for (const item of lista) {
       const proc = await processarPDF(item.id);
+      if (proc.status === 'ERRO') {
+        await qualidade.registrarFalha({id:item.id,name:`DLT-${item.dlt}`}, JSON.stringify(proc.debug || 'Falha de leitura'));
+        continue;
+      }
       const val = verificarValidade(item.data);
       const divergencia = avaliarDivergencia(item.dlt, item.serie);
       const nomePadronizado = montarNomePadrao(item.dlt, item.serie, item.data);
 
-      await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${item.id}`, {
+      const gravacao = await fetch(`${SUPABASE_URL}/rest/v1/certificados?id=eq.${item.id}`, {
         method: "PATCH",
         headers: supabaseHeaders(),
         body: JSON.stringify({
@@ -5662,6 +5699,11 @@ app.get("/reprocess", async (req, res) => {
         })
       });
 
+      if (!gravacao.ok) {
+        await qualidade.registrarFalha({id:item.id,name:`DLT-${item.dlt}`}, 'Banco: falha ao salvar reprocessamento.');
+        continue;
+      }
+      await qualidade.resolverFalha(item.id);
       total++;
 
       await atualizarControleSync({

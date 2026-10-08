@@ -1,4 +1,5 @@
 import express from "express";
+import { criarQualidade } from "./qualidade.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -862,6 +863,8 @@ function papeisPermitidos(req) {
 function permissaoDaRotaDLH(req) {
   const rota = req.path;
   const metodo = req.method;
+  if (rota.startsWith('/dlh/qualidade')) return metodo === 'POST' ? 'qualidade.avaliar' : 'qualidade.visualizar';
+  if (rota.startsWith('/dlh/processamento/falhas')) return metodo === 'POST' ? 'processamento.executar' : 'processamento.visualizar';
   if (rota.startsWith("/dlh/metricas")) return "consumo.visualizar";
   if (rota.startsWith("/dlh/suporte/tickets")) return "suporte.abrir";
   if (rota.startsWith("/dlh/divergentes")) return "divergentes.visualizar";
@@ -2443,7 +2446,7 @@ async function buscarCertificadosAtuaisDlh(filtros = []) {
     params.set("offset", String(offset));
 
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/certificados_dlh?${params.toString()}`,
+      `${SUPABASE_URL}/rest/v1/certificados_atuais_dlh?${params.toString()}`,
       { headers: supabaseHeaders() }
     );
     const pagina = validarListaSupabase(response, await response.json(), "Supabase certificados_dlh atuais");
@@ -4234,6 +4237,7 @@ async function inserirErroProcessamentoDLH(arquivo, proc, motivo, metaOverride =
 }
 
 async function registrarFalhaSincronizacaoDLH(arquivo, erro) {
+  await qualidade.registrarFalha(arquivo, erro);
   const meta = extrairDadosNomeArquivo(arquivo?.name || "");
   const mensagemOriginal = textoCurtoErroDLH(erro?.message);
   const motivo = erro?.codigo === "TIMEOUT_PROCESSAMENTO"
@@ -4371,15 +4375,17 @@ function execucaoTravadaDLH(controle) {
 // =========================
 // SYNC
 // =========================
-async function executarSyncDLH() {
+async function executarSyncDLH(arquivoId = null) {
   const idsBanco = await buscarIdsBancoDLH();
   const idsExcluidos = await buscarIdsExcluidosDLH();
   const arquivosDrive = await buscarArquivosDriveDLH();
+  await qualidade.resolverFalha('_sincronizacao');
 
   let processados = 0;
   const erros = [];
 
   for (const f of arquivosDrive) {
+    if (arquivoId && f.id !== arquivoId) continue;
     if (idsBanco.has(f.id)) continue;
     if (idsExcluidos.has(f.id)) continue;
     if (processados >= LIMITE) break;
@@ -4405,6 +4411,7 @@ async function executarSyncDLH() {
         const motivo = `Erro de processamento: não foi possível identificar ${camposAusentes.join(", ")} no PDF ou no nome do arquivo.`;
 
         await inserirErroProcessamentoDLH(f, proc, motivo, meta);
+        await qualidade.registrarFalha(f, motivo);
         idsBanco.add(f.id);
         processados++;
         erros.push({ arquivo: f.name, motivo });
@@ -4485,6 +4492,9 @@ async function executarSyncDLH() {
       processados++;
       invalidarCachesDLH();
 
+      if (proc.status === 'ERRO') await qualidade.registrarFalha(f, motivoRegistroDLH(proc, divergencia, duplicado));
+      else await qualidade.resolverFalha(f.id);
+
       await atualizarControleSyncDLH({
         em_execucao: true,
         ultima_execucao: new Date().toISOString(),
@@ -4547,6 +4557,7 @@ async function executarSyncAutomaticoDLH() {
     });
   } catch (e) {
     console.log("Erro na sincronização automática DLH:", e.message);
+    await qualidade.registrarFalha({id:'_sincronizacao',name:'Verificacao da pasta DLH'}, e);
     try {
       await atualizarControleSyncDLH({
         em_execucao: false,
@@ -4566,9 +4577,9 @@ async function executarSyncAutomaticoDLH() {
 // =========================
 // REPROCESSAMENTO
 // =========================
-async function executarReprocessDLH(limit = 50, offset = 0) {
+async function executarReprocessDLH(limit = 50, offset = 0, arquivoId = null) {
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data,certificado&limit=${limit}&offset=${offset}`,
+    `${SUPABASE_URL}/rest/v1/certificados_dlh?select=id,nome_original,dlh,serie,data,certificado&limit=${limit}&offset=${offset}${arquivoId ? `&id=eq.${encodeURIComponent(arquivoId)}` : ''}`,
     { headers: supabaseHeaders() }
   );
 
@@ -4628,6 +4639,7 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
       );
 
       if (!update.ok) {
+        await qualidade.registrarFalha({id:item.id,name:item.nome_original}, 'Banco: falha ao salvar reprocessamento.');
         erros.push({
           arquivo: item.nome_original,
           erro: await update.text()
@@ -4636,7 +4648,10 @@ async function executarReprocessDLH(limit = 50, offset = 0) {
       }
 
       processados++;
+      if (proc.status === 'ERRO') await qualidade.registrarFalha({id:item.id,name:item.nome_original}, motivoRegistroDLH(proc, divergencia, duplicado));
+      else await qualidade.resolverFalha(item.id);
     } catch (e) {
+      await qualidade.registrarFalha({id:item.id,name:item.nome_original}, e);
       erros.push({
         arquivo: item.nome_original,
         erro: e.message
@@ -4749,6 +4764,19 @@ app.get("/", (req, res) => {
 
 
 // Diagnóstico público mínimo: não consulta banco/Drive e nunca expõe segredos.
+const qualidade = criarQualidade({ app, modulo: 'DLH', url: SUPABASE_URL, headers: supabaseHeaders, fetch,
+  tentarNovamente: async (id) => {
+    if (syncLocalDLHEmExecucao || ['queued','running'].includes(reprocessJobDLH?.status)) throw new Error('Processamento em andamento. Tente novamente ao concluir.');
+    if (id === '_sincronizacao') return executarSyncAutomaticoDLH();
+    syncLocalDLHEmExecucao = true;
+    try {
+      const resultado = await executarReprocessDLH(1, 0, id);
+      if (!resultado.processados && !resultado.erros.length) await executarSyncDLH(id);
+      invalidarCachesDLH();
+    } finally { syncLocalDLHEmExecucao = false; }
+  }
+});
+
 app.get("/dlh/status-publico", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({
@@ -5765,7 +5793,7 @@ app.post("/dlh/loggers/checklist-pre-teste", async (req, res) => {
     const [status, certificadosBrutos] = await Promise.all([
       buscarStatusAtualDLHOperacional(unicos),
       buscarCertificadosPorPeriodoEmLotes({
-        tabela: "certificados_dlh",
+        tabela: "certificados_atuais_dlh",
         campoEquipamento: "dlh",
         equipamentos: unicos,
         testeInicio,
