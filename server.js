@@ -3655,9 +3655,9 @@ async function extrairTabelaPorColunas(buffer) {
     const erro = parseBR(er.text);
     const incerteza = Math.abs(parseBR(inc.text));
 
-    if (Number.isNaN(aquecimento) || Number.isNaN(erro) || Number.isNaN(incerteza)) continue;
+    if (![aquecimento, erro, incerteza].every(Number.isFinite)) continue;
     if (aquecimento < -100 || aquecimento > 200) continue;
-    if (Math.abs(erro) > 2 || incerteza > 2) continue;
+    // Desvios altos sao resultados de calibracao; o DMA define a reprovacao.
 
     candidatos.push({
       y: linha.y,
